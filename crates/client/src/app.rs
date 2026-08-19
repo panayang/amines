@@ -264,9 +264,11 @@ pub fn App() -> impl IntoView {
             <AuthModal
                 i18n=i18n
                 auth=auth
+                game=game
                 is_open=is_auth_open
                 set_open=set_auth_open
                 show_stats_first=show_stats_first
+                set_show_stats_first=set_show_stats_first
             />
 
             <CustomModal
@@ -279,6 +281,11 @@ pub fn App() -> impl IntoView {
             <GameOverModal
                 i18n=i18n
                 auth=auth
+                game=game
+            />
+
+            <SpVictoryModal
+                i18n=i18n
                 game=game
             />
         </div>

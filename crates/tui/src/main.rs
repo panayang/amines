@@ -13,8 +13,8 @@ use ratatui::{
     Frame, Terminal,
 };
 use shared::ai_solver::{AiAction, AiSolver, BotTier};
-use shared::board::{Board, BoardConfig, GameStatus, RevealResult};
-use shared::protocol::{CellSnapshot, ClientMessage, PlayerInfo, ServerMessage};
+use shared::board::{Board, BoardConfig, Difficulty, GameStatus, LocalPersonalBests, RevealResult};
+use shared::protocol::{CellSnapshot, ClientMessage, PlayerInfo, ScoreDelta, ServerMessage};
 use shared::topology::Coord3D;
 use std::io::stdout;
 use std::sync::mpsc::{channel, Receiver};
@@ -64,6 +64,9 @@ struct TuiApp {
 
     // Solver Recommendation
     last_hint: Option<String>,
+    is_paused: bool,
+    mp_ready: bool,
+    bot_speed_ms: u64,
 
     // Custom Mode
     is_custom_modal: bool,
@@ -73,6 +76,12 @@ struct TuiApp {
     custom_m: usize,
     custom_field: usize, // 0: W, 1: H, 2: D, 3: M
     custom_error: Option<String>,
+
+    // Records & Personal Bests
+    pb_records: LocalPersonalBests,
+    show_pb_modal: bool,
+    moves_count: u32,
+    mp_settlement_modal: Option<(Vec<String>, Vec<ScoreDelta>)>,
 
     // Help & Keybindings Manual Modal
     show_help_modal: bool,
@@ -90,6 +99,7 @@ impl TuiApp {
             current_layer: config.depth / 2,
             game_start_time: None,
             elapsed_secs: 0,
+            moves_count: 0,
             status_msg: "SYSTEM READY // Press [F1] or [?] for Full Keymap Guide.".into(),
 
             server_running: false,
@@ -110,6 +120,9 @@ impl TuiApp {
             net_tx: None,
             net_rx,
             last_hint: None,
+            is_paused: false,
+            mp_ready: false,
+            bot_speed_ms: 800,
 
             is_custom_modal: false,
             custom_w: 16,
@@ -119,6 +132,10 @@ impl TuiApp {
             custom_field: 0,
             custom_error: None,
 
+            pb_records: LocalPersonalBests::load_or_default(),
+            show_pb_modal: false,
+            mp_settlement_modal: None,
+
             show_help_modal: false,
         }
     }
@@ -127,6 +144,8 @@ impl TuiApp {
         self.board = Board::new(self.board_config);
         self.game_start_time = None;
         self.elapsed_secs = 0;
+        self.moves_count = 0;
+        self.is_paused = false;
         self.status_msg = "Game re-initialized. Ready.".into();
         self.last_hint = None;
     }
@@ -207,6 +226,12 @@ impl TuiApp {
                         self.in_room = true;
                         self.board_config = snap.config;
                         self.board = Board::new(snap.config);
+                        self.bot_speed_ms = snap.bot_speed_ms;
+                        if let Some(me) =
+                            snap.players.iter().find(|p| p.username == self.player_name)
+                        {
+                            self.mp_ready = me.is_ready;
+                        }
                         self.room_players = snap.players;
                         self.logs.push(format!(
                             "🏠 [ROOM] Room: {} ({} players)",
@@ -257,9 +282,25 @@ impl TuiApp {
                             hit_coord.x, hit_coord.y, hit_coord.z
                         ));
                     }
-                    ServerMessage::GameOver { winners, .. } => {
+                    ServerMessage::PlayerFlagToggled {
+                        coord, is_flagged, ..
+                    } => {
+                        if let Some(cell) = self.board.cells.iter_mut().find(|c| c.coord == coord) {
+                            cell.is_flagged = is_flagged;
+                            if is_flagged {
+                                self.board.flag_count += 1;
+                            } else {
+                                self.board.flag_count = self.board.flag_count.saturating_sub(1);
+                            }
+                        }
+                    }
+                    ServerMessage::GameOver {
+                        winners,
+                        final_scores,
+                    } => {
                         self.logs
                             .push(format!("🏁 [END] Game Over! Winner(s): {:?}", winners));
+                        self.mp_settlement_modal = Some((winners, final_scores));
                     }
                     ServerMessage::ChatMessage(chat) => {
                         self.logs
@@ -290,7 +331,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         app.poll_network();
 
         if let Some(st) = app.game_start_time {
-            if app.board.status == GameStatus::Playing {
+            if app.board.status == GameStatus::Playing && !app.is_paused {
                 app.elapsed_secs = st.elapsed().as_secs();
             }
         }
@@ -322,6 +363,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             _ => {
                                 app.show_help_modal = false;
                             }
+                        }
+                    } else if app.show_pb_modal {
+                        match key.code {
+                            KeyCode::Esc
+                            | KeyCode::Char('q')
+                            | KeyCode::Char('Q')
+                            | KeyCode::Char('g')
+                            | KeyCode::Char('G')
+                            | KeyCode::Enter
+                            | KeyCode::Char(' ') => {
+                                app.show_pb_modal = false;
+                            }
+                            _ => {
+                                app.show_pb_modal = false;
+                            }
+                        }
+                    } else if app.mp_settlement_modal.is_some() {
+                        match key.code {
+                            KeyCode::Char('s') | KeyCode::Char('S') => {
+                                if let Some(tx) = &app.net_tx {
+                                    let _ = tx.send(ClientMessage::StartGame);
+                                    app.status_msg =
+                                        "🚀 Launched next multiplayer match round!".into();
+                                }
+                                app.mp_settlement_modal = None;
+                            }
+                            KeyCode::Esc
+                            | KeyCode::Char('q')
+                            | KeyCode::Char('Q')
+                            | KeyCode::Enter
+                            | KeyCode::Char(' ') => {
+                                app.mp_settlement_modal = None;
+                            }
+                            _ => {}
                         }
                     } else if app.is_custom_modal {
                         match key.code {
@@ -384,11 +459,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     } else {
                         match key.code {
                             KeyCode::Char('q') | KeyCode::Char('Q') => break,
-                            KeyCode::F(1)
-                            | KeyCode::Char('?')
-                            | KeyCode::Char('k')
-                            | KeyCode::Char('K') => {
+                            KeyCode::F(1) | KeyCode::Char('?') => {
                                 app.show_help_modal = true;
+                            }
+                            KeyCode::F(3) | KeyCode::Char('g') | KeyCode::Char('G') => {
+                                app.show_pb_modal = !app.show_pb_modal;
+                            }
+                            KeyCode::Char('s') | KeyCode::Char('S')
+                                if app.mode == TuiMode::Multiplayer =>
+                            {
+                                if let Some(tx) = &app.net_tx {
+                                    let _ = tx.send(ClientMessage::StartGame);
+                                    app.status_msg =
+                                        "🚀 Sent LAUNCH MATCH command to server!".into();
+                                }
                             }
                             KeyCode::Char('m') | KeyCode::Char('M') => {
                                 app.mode = match app.mode {
@@ -455,12 +539,64 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
                             KeyCode::Enter | KeyCode::Char(' ') => {
-                                if app.board.status == GameStatus::Lost
-                                    || app.board.status == GameStatus::Won
-                                {
+                                if app.mode == TuiMode::HostServer {
+                                    if !app.server_running {
+                                        let port = app.server_port;
+                                        app.server_running = true;
+                                        app.server_handle = Some(tokio::spawn(async move {
+                                            let _ = server::run_server(
+                                                port,
+                                                "minesweeper_tui.db",
+                                                None,
+                                            )
+                                            .await;
+                                        }));
+                                        app.status_msg =
+                                            format!("🚀 Local Server ONLINE -> 0.0.0.0:{port}");
+                                    } else {
+                                        if let Some(h) = app.server_handle.take() {
+                                            h.abort();
+                                        }
+                                        app.server_running = false;
+                                        app.status_msg = "🛑 Local Server STOPPED.".into();
+                                    }
+                                } else if app.mode == TuiMode::Multiplayer && !app.in_room {
+                                    if !app.is_connected {
+                                        app.connect_ws();
+                                    }
+                                    if let Some(tx) = &app.net_tx {
+                                        let _ = tx.send(ClientMessage::CreateRoom {
+                                            name: format!("{}'s TUI Match", app.player_name),
+                                            config: app.board_config,
+                                            username: app.player_name.clone(),
+                                            token: None,
+                                        });
+                                        app.status_msg = "🏠 Creating Match Room...".into();
+                                    } else {
+                                        app.status_msg = "Connecting to server... Press [Enter] or [C] once connected.".into();
+                                    }
+                                } else if app.mode == TuiMode::SinglePlayer && app.is_paused {
+                                    app.is_paused = false;
+                                    app.status_msg = "▶️ SIMULATION RESUMED".into();
+                                } else if app.board.status == GameStatus::Won {
                                     app.status_msg =
-                                        "Game Over! Press [R] to start a new game.".into();
+                                        "🏆 VICTORY ACHIEVED! Press [R] to start a new mission."
+                                            .into();
+                                } else if app.board.status == GameStatus::Lost {
+                                    app.status_msg =
+                                        "💥 Game Over! Press [R] to start a new game.".into();
+                                } else if app.mode == TuiMode::Multiplayer {
+                                    if let Some(tx) = &app.net_tx {
+                                        let c = app.cursor;
+                                        let cell = app.board.get_cell(c);
+                                        if cell.is_revealed {
+                                            let _ = tx.send(ClientMessage::ChordCell { coord: c });
+                                        } else {
+                                            let _ = tx.send(ClientMessage::RevealCell { coord: c });
+                                        }
+                                    }
                                 } else {
+                                    app.moves_count += 1;
                                     if app.game_start_time.is_none() {
                                         app.game_start_time = Some(Instant::now());
                                     }
@@ -477,29 +613,192 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         }
                                     }
                                     if app.board.status == GameStatus::Won {
-                                        app.status_msg =
-                                            "🏆 [VICTORY] All non-mine cells cleared!".into();
+                                        let is_new = app.pb_records.update_if_best(
+                                            app.board_config.difficulty,
+                                            app.elapsed_secs,
+                                            app.moves_count,
+                                        );
+                                        if is_new {
+                                            app.status_msg = format!("🎉 [NEW PERSONAL BEST!] {}s ({} moves). Press [G] to view, [R] to restart.", app.elapsed_secs, app.moves_count);
+                                        } else {
+                                            app.status_msg =
+                                                "🏆 [VICTORY] All safe cells cleared! Press [G] for Records, [R] for new game.".into();
+                                        }
                                     }
                                 }
                             }
-                            KeyCode::Char('f') | KeyCode::Char('F') => {
-                                if app.board.status == GameStatus::Lost
-                                    || app.board.status == GameStatus::Won
-                                {
+                            KeyCode::Char('f')
+                            | KeyCode::Char('F')
+                            | KeyCode::Char('x')
+                            | KeyCode::Char('X') => {
+                                app.cursor.z = app.current_layer;
+                                if app.mode == TuiMode::SinglePlayer && app.is_paused {
                                     app.status_msg =
-                                        "Game Over! Press [R] to start a new game.".into();
+                                        "⚠️ Game is paused. Press [P] to resume.".into();
+                                } else if app.board.status == GameStatus::Won {
+                                    app.status_msg = "🏆 VICTORY ACHIEVED! All mines secured. Press [R] for new mission.".into();
+                                } else if app.board.status == GameStatus::Lost {
+                                    app.status_msg =
+                                        "💥 Game Over! Press [R] to restart game.".into();
+                                } else if app.mode == TuiMode::Multiplayer {
+                                    if let Some(tx) = &app.net_tx {
+                                        let _ = tx
+                                            .send(ClientMessage::ToggleFlag { coord: app.cursor });
+                                    }
                                 } else {
-                                    app.board.toggle_flag(app.cursor);
+                                    let cell = app.board.get_cell(app.cursor);
+                                    if cell.is_revealed {
+                                        app.status_msg =
+                                            "⚠️ Cannot flag an already revealed cell!".into();
+                                    } else {
+                                        let was_flagged = cell.is_flagged;
+                                        if app.board.toggle_flag(app.cursor) {
+                                            let remaining_mines = app
+                                                .board_config
+                                                .mines
+                                                .saturating_sub(app.board.flag_count);
+                                            if was_flagged {
+                                                app.status_msg = format!(
+                                                    "🏳️ Flag removed @ ({},{},{}) │ 💣 Remaining: {}",
+                                                    app.cursor.x, app.cursor.y, app.cursor.z, remaining_mines
+                                                );
+                                            } else {
+                                                app.status_msg = format!(
+                                                    "🚩 Flag placed @ ({},{},{}) │ 💣 Remaining: {}",
+                                                    app.cursor.x, app.cursor.y, app.cursor.z, remaining_mines
+                                                );
+                                            }
+                                        }
+                                    }
                                 }
                             }
                             KeyCode::Char('c') | KeyCode::Char('C') => {
-                                if app.board.status == GameStatus::Lost
-                                    || app.board.status == GameStatus::Won
-                                {
+                                if app.mode == TuiMode::HostServer {
+                                    app.server_url =
+                                        format!("ws://127.0.0.1:{}/ws", app.server_port);
+                                    app.mode = TuiMode::Multiplayer;
+                                    app.connect_ws();
+                                    app.status_msg = format!(
+                                        "🔌 Connecting Client to Local Host @ 127.0.0.1:{}...",
+                                        app.server_port
+                                    );
+                                } else if app.mode == TuiMode::Multiplayer && !app.in_room {
+                                    if !app.is_connected {
+                                        app.connect_ws();
+                                    }
+                                    if let Some(tx) = &app.net_tx {
+                                        let _ = tx.send(ClientMessage::CreateRoom {
+                                            name: format!("{}'s TUI Match", app.player_name),
+                                            config: app.board_config,
+                                            username: app.player_name.clone(),
+                                            token: None,
+                                        });
+                                        app.status_msg = "🏠 Creating Match Room...".into();
+                                    }
+                                } else if app.mode == TuiMode::SinglePlayer && app.is_paused {
+                                    // Ignored
+                                } else if app.board.status == GameStatus::Won {
                                     app.status_msg =
-                                        "Game Over! Press [R] to start a new game.".into();
+                                        "🏆 VICTORY ACHIEVED! Press [R] to start a new mission."
+                                            .into();
+                                } else if app.board.status == GameStatus::Lost {
+                                    app.status_msg =
+                                        "💥 Game Over! Press [R] to start a new game.".into();
+                                } else if app.mode == TuiMode::Multiplayer {
+                                    if let Some(tx) = &app.net_tx {
+                                        let _ =
+                                            tx.send(ClientMessage::ChordCell { coord: app.cursor });
+                                    }
                                 } else {
                                     app.board.chord(app.cursor, None, None);
+                                }
+                            }
+                            KeyCode::Tab => {
+                                if app.mode == TuiMode::Multiplayer && app.in_room {
+                                    app.mp_ready = !app.mp_ready;
+                                    if let Some(tx) = &app.net_tx {
+                                        let _ = tx.send(ClientMessage::SetReady {
+                                            ready: app.mp_ready,
+                                        });
+                                        app.status_msg = if app.mp_ready {
+                                            "✅ [MP] Status: READY".into()
+                                        } else {
+                                            "⏳ [MP] Status: UNREADY".into()
+                                        };
+                                    }
+                                }
+                            }
+                            KeyCode::Char('l') | KeyCode::Char('L') => {
+                                if app.mode == TuiMode::Multiplayer && app.in_room {
+                                    if let Some(tx) = &app.net_tx {
+                                        let _ = tx.send(ClientMessage::LeaveRoom);
+                                    }
+                                    app.in_room = false;
+                                    app.status_msg = "🚪 Left Room.".into();
+                                }
+                            }
+                            KeyCode::Char('t') | KeyCode::Char('T') => {
+                                if app.mode == TuiMode::Multiplayer && app.in_room {
+                                    if let Some(tx) = &app.net_tx {
+                                        let _ = tx.send(ClientMessage::SendChat {
+                                            text: "Greetings from TUI Operative! ⚡".into(),
+                                        });
+                                    }
+                                }
+                            }
+                            KeyCode::Char('+') | KeyCode::Char('=') => {
+                                if app.mode == TuiMode::HostServer {
+                                    app.server_port = app.server_port.saturating_add(1);
+                                    app.status_msg = format!(
+                                        "🔌 Host listening port set to {}",
+                                        app.server_port
+                                    );
+                                } else if app.mode == TuiMode::Multiplayer && app.in_room {
+                                    app.bot_speed_ms = (app.bot_speed_ms + 200).min(5000);
+                                    if let Some(tx) = &app.net_tx {
+                                        let _ = tx.send(ClientMessage::UpdateBotSpeed {
+                                            speed_ms: app.bot_speed_ms,
+                                        });
+                                        app.status_msg = format!(
+                                            "🤖 Bot decision delay set to {}ms",
+                                            app.bot_speed_ms
+                                        );
+                                    }
+                                }
+                            }
+                            KeyCode::Char('-') | KeyCode::Char('_') => {
+                                if app.mode == TuiMode::HostServer {
+                                    app.server_port = app.server_port.saturating_sub(1).max(1024);
+                                    app.status_msg = format!(
+                                        "🔌 Host listening port set to {}",
+                                        app.server_port
+                                    );
+                                } else if app.mode == TuiMode::Multiplayer && app.in_room {
+                                    app.bot_speed_ms =
+                                        app.bot_speed_ms.saturating_sub(200).max(200);
+                                    if let Some(tx) = &app.net_tx {
+                                        let _ = tx.send(ClientMessage::UpdateBotSpeed {
+                                            speed_ms: app.bot_speed_ms,
+                                        });
+                                        app.status_msg = format!(
+                                            "🤖 Bot decision delay set to {}ms",
+                                            app.bot_speed_ms
+                                        );
+                                    }
+                                }
+                            }
+                            KeyCode::Char('k') | KeyCode::Char('K') => {
+                                if app.mode == TuiMode::Multiplayer && app.in_room {
+                                    if let Some(bot) = app.room_players.iter().find(|p| p.is_bot) {
+                                        let bot_id = bot.id.clone();
+                                        if let Some(tx) = &app.net_tx {
+                                            let _ = tx.send(ClientMessage::RemoveBot { bot_id });
+                                            app.status_msg =
+                                                format!("❌ Kicked bot {}", bot.username);
+                                        }
+                                    }
+                                } else {
+                                    app.show_help_modal = true;
                                 }
                             }
                             KeyCode::Char('/') => {
@@ -588,9 +887,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     app.status_msg = "Connecting to WebSocket server...".into();
                                 }
                             }
-                            // Create room in MP mode
+                            // Pause toggle in SinglePlayer or Create room in MP mode
                             KeyCode::Char('p') | KeyCode::Char('P') => {
-                                if app.mode == TuiMode::Multiplayer
+                                if app.mode == TuiMode::SinglePlayer {
+                                    app.is_paused = !app.is_paused;
+                                    app.status_msg = if app.is_paused {
+                                        "⏸️ SIMULATION PAUSED // Press [P] to Resume".into()
+                                    } else {
+                                        "▶️ SIMULATION RESUMED".into()
+                                    };
+                                } else if app.mode == TuiMode::Multiplayer
                                     && app.is_connected
                                     && !app.in_room
                                 {
@@ -613,13 +919,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     if let Some(tx) = &app.net_tx {
                                         let _ = tx.send(ClientMessage::AddBot {
                                             tier: BotTier::Master,
-                                            speed_ms: None,
+                                            speed_ms: Some(app.bot_speed_ms),
                                         });
                                         app.status_msg =
                                             "🤖 Added Master AI Bot (Turing) to room!".into();
                                     }
                                 } else if app.mode == TuiMode::SinglePlayer {
-                                    if app.board.status == GameStatus::Lost
+                                    if app.is_paused {
+                                        // Ignored
+                                    } else if app.board.status == GameStatus::Lost
                                         || app.board.status == GameStatus::Won
                                     {
                                         app.status_msg =
@@ -671,6 +979,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
+        if app.mode == TuiMode::SinglePlayer
+            && app.board.status == GameStatus::Won
+            && !app.show_pb_modal
+        {
+            let is_new = app.pb_records.update_if_best(
+                app.board_config.difficulty,
+                app.elapsed_secs,
+                app.moves_count,
+            );
+            if is_new {
+                app.status_msg = format!("🎉 [NEW PERSONAL BEST!] {}s ({} moves). Press [Esc] to dismiss, [R] to restart.", app.elapsed_secs, app.moves_count);
+            } else {
+                app.status_msg = "🏆 [VICTORY] All safe cells cleared! Press [Esc] to dismiss, [R] for new game.".into();
+            }
+            app.show_pb_modal = true;
+        }
+
         if last_tick.elapsed() >= tick_rate {
             last_tick = Instant::now();
         }
@@ -696,14 +1021,32 @@ fn ui(f: &mut Frame, app: &TuiApp) {
     // Top Cyberpunk HUD Header
     render_cyber_header(f, app, root[0]);
 
-    // Body: Left (3D Board Viewport) & Right (Tactical Cockpit & Mini Layer Map)
-    let body = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(66), Constraint::Percentage(34)])
-        .split(root[1]);
-
-    render_cyber_board(f, app, body[0]);
-    render_cyber_cockpit(f, app, body[1]);
+    // Body based on active mode
+    match app.mode {
+        TuiMode::SinglePlayer => {
+            let body = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(66), Constraint::Percentage(34)])
+                .split(root[1]);
+            render_cyber_board(f, app, body[0]);
+            render_cyber_cockpit(f, app, body[1]);
+        }
+        TuiMode::Multiplayer => {
+            if !app.in_room {
+                render_tui_multiplayer_lobby(f, app, root[1]);
+            } else {
+                let body = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([Constraint::Percentage(66), Constraint::Percentage(34)])
+                    .split(root[1]);
+                render_cyber_board(f, app, body[0]);
+                render_tui_multiplayer_cockpit(f, app, body[1]);
+            }
+        }
+        TuiMode::HostServer => {
+            render_tui_host_server_panel(f, app, root[1]);
+        }
+    }
 
     // Bottom Navigation Bar
     render_cyber_footer(f, app, root[2]);
@@ -711,6 +1054,21 @@ fn ui(f: &mut Frame, app: &TuiApp) {
     // Fullscreen Help Cheatsheet Modal if requested
     if app.show_help_modal {
         render_help_modal(f, app, f.area());
+    }
+
+    // Personal Bests Modal if requested
+    if app.show_pb_modal {
+        render_tui_pb_modal(f, app, f.area());
+    }
+
+    // Multiplayer Match Over Settlement Modal if present
+    if let Some((winners, final_scores)) = &app.mp_settlement_modal {
+        render_tui_settlement_modal(f, winners, final_scores, f.area());
+    }
+
+    // Custom 3D Setup Modal
+    if app.is_custom_modal {
+        render_custom_setup_modal(f, app, f.area());
     }
 }
 
@@ -739,50 +1097,197 @@ fn render_cyber_header(f: &mut Frame, app: &TuiApp, area: Rect) {
         ),
     };
 
-    let mines_left = app.board_config.mines.saturating_sub(app.board.flag_count);
-    let status_color = match app.board.status {
-        GameStatus::Playing => Color::Green,
-        GameStatus::Won => Color::Yellow,
-        GameStatus::Lost => Color::Red,
-        _ => Color::White,
-    };
-
-    let header_line = Line::from(vec![
-        Span::styled(
-            "⚡ 3D MÖBIUS MINESWEEPER ",
-            Style::default()
-                .fg(Color::Rgb(167, 139, 250))
-                .add_modifier(Modifier::BOLD),
-        ),
-        mode_badge,
-        Span::raw("  "),
-        Span::styled(
-            format!("[ 💣 {:03} ] ", mines_left),
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!("[ ⏱️ {:03}s ] ", app.elapsed_secs.min(999)),
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!(
-                "[ 🎚️ LAYER Z: {}/{} ] ",
-                app.current_layer,
-                app.board.dims.depth - 1
+    let header_line = match app.mode {
+        TuiMode::HostServer => Line::from(vec![
+            Span::styled(
+                "⚡ 3D MÖBIUS DAEMON ",
+                Style::default()
+                    .fg(Color::Rgb(167, 139, 250))
+                    .add_modifier(Modifier::BOLD),
             ),
-            Style::default()
-                .fg(Color::Magenta)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!("[ {:?} ]", app.board.status),
-            Style::default()
-                .fg(status_color)
-                .add_modifier(Modifier::BOLD),
-        ),
-    ]);
+            mode_badge,
+            Span::raw("  "),
+            Span::styled(
+                format!("[ 🔌 PORT: {} ] ", app.server_port),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            if app.server_running {
+                Span::styled(
+                    "[ 🟢 ONLINE - 0.0.0.0 ] ",
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                Span::styled(
+                    "[ 🔴 OFFLINE ] ",
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                )
+            },
+            Span::styled(
+                " [Space/H] Start/Stop  [+/-] Port  [C] Connect Client",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::DIM),
+            ),
+        ]),
+        TuiMode::Multiplayer => {
+            if !app.in_room {
+                Line::from(vec![
+                    Span::styled(
+                        "⚡ 3D MÖBIUS NET ",
+                        Style::default()
+                            .fg(Color::Rgb(167, 139, 250))
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    mode_badge,
+                    Span::raw("  "),
+                    Span::styled(
+                        format!("[ 👤 {} ] ", app.player_name),
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    if app.is_connected {
+                        Span::styled(
+                            "[ 🟢 CONNECTED ] ",
+                            Style::default()
+                                .fg(Color::Green)
+                                .add_modifier(Modifier::BOLD),
+                        )
+                    } else {
+                        Span::styled(
+                            "[ 🔴 DISCONNECTED ] ",
+                            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                        )
+                    },
+                    Span::styled(
+                        " [N] Connect  [C/Enter] Create Room  [1/2/3/4] Diff",
+                        Style::default().fg(Color::Cyan).add_modifier(Modifier::DIM),
+                    ),
+                ])
+            } else {
+                let mines_left = app.board_config.mines.saturating_sub(app.board.flag_count);
+                Line::from(vec![
+                    Span::styled(
+                        "⚡ 3D MÖBIUS MATCH ",
+                        Style::default()
+                            .fg(Color::Rgb(167, 139, 250))
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    mode_badge,
+                    Span::raw("  "),
+                    Span::styled(
+                        format!("[ 💣 {:03} ] ", mines_left),
+                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!(
+                            "[ 🎚️ LAYER Z: {}/{} ] ",
+                            app.current_layer,
+                            app.board.dims.depth.saturating_sub(1)
+                        ),
+                        Style::default()
+                            .fg(Color::Magenta)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    if app.mp_ready {
+                        Span::styled(
+                            "[ ✅ READY ] ",
+                            Style::default()
+                                .fg(Color::Green)
+                                .add_modifier(Modifier::BOLD),
+                        )
+                    } else {
+                        Span::styled(
+                            "[ ⏳ UNREADY ] ",
+                            Style::default()
+                                .fg(Color::Yellow)
+                                .add_modifier(Modifier::BOLD),
+                        )
+                    },
+                    Span::styled(
+                        " [Tab] Ready  [B] Bot  [L] Leave",
+                        Style::default().fg(Color::Cyan).add_modifier(Modifier::DIM),
+                    ),
+                ])
+            }
+        }
+        TuiMode::SinglePlayer => {
+            let mines_left = app.board_config.mines.saturating_sub(app.board.flag_count);
+            let status_color = match app.board.status {
+                GameStatus::Playing => Color::Green,
+                GameStatus::Won => Color::Yellow,
+                GameStatus::Lost => Color::Red,
+                _ => Color::White,
+            };
+            Line::from(vec![
+                Span::styled(
+                    "⚡ 3D MÖBIUS MINESWEEPER ",
+                    Style::default()
+                        .fg(Color::Rgb(167, 139, 250))
+                        .add_modifier(Modifier::BOLD),
+                ),
+                mode_badge,
+                Span::raw("  "),
+                Span::styled(
+                    format!("[ 💣 {:03} ] ", mines_left),
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("[ ⏱️ {:03}s ] ", app.elapsed_secs.min(999)),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!(
+                        "[ 🏆 PB: {} ] ",
+                        if let Some(r) = app.pb_records.get_pb(app.board_config.difficulty) {
+                            format!("{:>2}s", r.time_secs)
+                        } else {
+                            "--:--".to_string()
+                        }
+                    ),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!(
+                        "[ 🎚️ LAYER Z: {}/{} ] ",
+                        app.current_layer,
+                        app.board.dims.depth.saturating_sub(1)
+                    ),
+                    Style::default()
+                        .fg(Color::Magenta)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    if app.is_paused {
+                        "[ ⏸️ PAUSED ] ".to_string()
+                    } else {
+                        format!("[ {:?} ] ", app.board.status)
+                    },
+                    Style::default()
+                        .fg(if app.is_paused {
+                            Color::Yellow
+                        } else {
+                            status_color
+                        })
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "[R] 🔄 Restart  [P] ⏸️ Pause  [F3/G] 🏆 Records",
+                    Style::default()
+                        .fg(Color::Rgb(167, 139, 250))
+                        .add_modifier(Modifier::DIM),
+                ),
+            ])
+        }
+    };
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -802,6 +1307,48 @@ fn render_cyber_header(f: &mut Frame, app: &TuiApp, area: Rect) {
 }
 
 fn render_cyber_board(f: &mut Frame, app: &TuiApp, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Rgb(139, 92, 246)))
+        .title(Span::styled(
+            format!(
+                " 🌐 3D MÖBIUS PROJECTION // LAYER Z: {}/{} ",
+                app.current_layer,
+                app.board.dims.depth.saturating_sub(1)
+            ),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ));
+
+    // Anti-Cheat Pause Screen
+    if app.mode == TuiMode::SinglePlayer && app.is_paused {
+        let paused_lines = vec![
+            Line::from(vec![Span::raw("")]),
+            Line::from(vec![Span::raw("")]),
+            Line::from(vec![Span::styled(
+                "  ⏸️  [ SIMULATION PAUSED // MÖBIUS PROJECTION FROZEN ]  ",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .bg(Color::Rgb(40, 20, 70))
+                    .add_modifier(Modifier::BOLD),
+            )]),
+            Line::from(vec![Span::raw("")]),
+            Line::from(vec![Span::styled(
+                "       Press [P] or [Space] to Resume Timer & Unfreeze Grid",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::ITALIC),
+            )]),
+        ];
+        let widget = Paragraph::new(paused_lines)
+            .block(block)
+            .alignment(Alignment::Center);
+        f.render_widget(widget, area);
+        return;
+    }
+
     let dims = app.board.dims;
     let z = app.current_layer;
     let mut lines = Vec::new();
@@ -1146,25 +1693,50 @@ fn render_cyber_cockpit(f: &mut Frame, app: &TuiApp, area: Rect) {
     let cheatsheet_lines = vec![
         Line::from(vec![
             Span::styled(
-                "• [1/2/3/4] ",
+                "• [R]        ",
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::raw(": Easy / Med / Exp / Custom"),
+            Span::raw(": 🔄 Restart Game / New Board"),
         ]),
         Line::from(vec![
             Span::styled(
-                "• [WASD]    ",
+                "• [P]        ",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(": ⏸️ Pause / Resume (Hide Grid)"),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "• [Space/Ent]",
                 Style::default()
                     .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(": ⛏️ Reveal Cell (or Chord)"),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "• [F] / [X]  ",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(": 🚩 Toggle Flag"),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "• [WASD]     ",
+                Style::default()
+                    .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(": Move 2D Cursor Across Grid"),
         ]),
         Line::from(vec![
             Span::styled(
-                "• [PgUp/Dn] ",
+                "• [PgUp/Dn]  ",
                 Style::default()
                     .fg(Color::Magenta)
                     .add_modifier(Modifier::BOLD),
@@ -1173,21 +1745,21 @@ fn render_cyber_cockpit(f: &mut Frame, app: &TuiApp, area: Rect) {
         ]),
         Line::from(vec![
             Span::styled(
-                "• [Space/F] ",
+                "• [1/2/3/4]  ",
                 Style::default()
-                    .fg(Color::Yellow)
+                    .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::raw(": Reveal Cell / Toggle Flag 🚩"),
+            Span::raw(": Easy / Med / Exp / Custom (U)"),
         ]),
         Line::from(vec![
             Span::styled(
-                "• [B] / [/] ",
+                "• [B] / [/]  ",
                 Style::default()
                     .fg(Color::Rgb(192, 132, 252))
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::raw(": Run AI Bot Move / Hint Solver"),
+            Span::raw(": Run AI Bot Move / AI Hint"),
         ]),
     ];
     let cheatsheet_block = Block::default()
@@ -1232,134 +1804,433 @@ fn render_cyber_cockpit(f: &mut Frame, app: &TuiApp, area: Rect) {
     );
 }
 
-fn render_cyber_footer(f: &mut Frame, _app: &TuiApp, area: Rect) {
-    let line1 = Line::from(vec![
-        Span::styled(
-            " 🎮 DIFFICULTY: ",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
+fn render_cyber_footer(f: &mut Frame, app: &TuiApp, area: Rect) {
+    let (line1, line2, line3) = match app.mode {
+        TuiMode::HostServer => (
+            Line::from(vec![
+                Span::styled(
+                    " 🖥️ HOST SERVER:  ",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "[Space / H / Enter] ",
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("Toggle Daemon Online/Offline  │  "),
+                Span::styled(
+                    "[+ / -] ",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("Port Up/Down  │  "),
+                Span::styled(
+                    "[C] ",
+                    Style::default()
+                        .fg(Color::Magenta)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("Connect Client to Local Host"),
+            ]),
+            Line::from(vec![
+                Span::styled(
+                    " 🔌 DAEMON INFO:   ",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(format!(
+                    "0.0.0.0:{}  │  Protocol: Tokio WebSocket + SQLite WAL  │  Mode: Auto-Sync",
+                    app.server_port
+                )),
+            ]),
+            Line::from(vec![
+                Span::styled(
+                    " ⚡ MAINFRAME:     ",
+                    Style::default()
+                        .fg(Color::Rgb(192, 132, 252))
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "[M] ",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("Cycle Mode (SP ⇄ MP ⇄ Host)  │  "),
+                Span::styled(
+                    "[F1 / ?] ",
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("Manual  │  "),
+                Span::styled(
+                    "[Q] ",
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("Quit Application"),
+            ]),
         ),
-        Span::styled(
-            "[1] ",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
+        TuiMode::Multiplayer => {
+            if !app.in_room {
+                (
+                    Line::from(vec![
+                        Span::styled(
+                            " 🌐 MP LOBBY:      ",
+                            Style::default()
+                                .fg(Color::Cyan)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            "[N] ",
+                            Style::default()
+                                .fg(Color::Green)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw("Connect Server  │  "),
+                        Span::styled(
+                            "[C / Enter] ",
+                            Style::default()
+                                .fg(Color::Yellow)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw("Create Room  │  "),
+                        Span::styled(
+                            "[1/2/3/4] ",
+                            Style::default()
+                                .fg(Color::Magenta)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw("Room Difficulty (Easy/Med/Exp/Custom)"),
+                    ]),
+                    Line::from(vec![
+                        Span::styled(
+                            " 👤 PROFILE:       ",
+                            Style::default()
+                                .fg(Color::Yellow)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw(format!(
+                            "Callsign: {}  │  Target: {}  │  Status: {}",
+                            app.player_name,
+                            app.server_url,
+                            if app.is_connected {
+                                "Connected"
+                            } else {
+                                "Disconnected"
+                            }
+                        )),
+                    ]),
+                    Line::from(vec![
+                        Span::styled(
+                            " ⚡ MAINFRAME:     ",
+                            Style::default()
+                                .fg(Color::Rgb(192, 132, 252))
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            "[M] ",
+                            Style::default()
+                                .fg(Color::Cyan)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw("Cycle Mode  │  "),
+                        Span::styled(
+                            "[F1 / ?] ",
+                            Style::default()
+                                .fg(Color::Green)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw("Manual  │  "),
+                        Span::styled(
+                            "[Q] ",
+                            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw("Quit"),
+                    ]),
+                )
+            } else {
+                (
+                    Line::from(vec![
+                        Span::styled(
+                            " 🏠 MATCH CONTROLS:",
+                            Style::default()
+                                .fg(Color::Green)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            "[S] ",
+                            Style::default()
+                                .fg(Color::LightGreen)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            "🚀 Launch Match",
+                            Style::default()
+                                .fg(Color::Yellow)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw("  │  "),
+                        Span::styled(
+                            "[Tab] ",
+                            Style::default()
+                                .fg(Color::Green)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw("Ready  │  "),
+                        Span::styled(
+                            "[B] ",
+                            Style::default()
+                                .fg(Color::Magenta)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw("Bot  │  "),
+                        Span::styled(
+                            "[+/-] ",
+                            Style::default()
+                                .fg(Color::Cyan)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw("Delay  │  "),
+                        Span::styled(
+                            "[K] ",
+                            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw("Kick  │  "),
+                        Span::styled(
+                            "[L] ",
+                            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw("Leave"),
+                    ]),
+                    Line::from(vec![
+                        Span::styled(
+                            " 🕹️ GRID ACTIONS:  ",
+                            Style::default()
+                                .fg(Color::Yellow)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            "[Space/Enter] ",
+                            Style::default()
+                                .fg(Color::Green)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw("Reveal/Chord  │  "),
+                        Span::styled(
+                            "[F / X] ",
+                            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw("Flag 🚩  │  "),
+                        Span::styled(
+                            "[WASD] ",
+                            Style::default()
+                                .fg(Color::Cyan)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw("Move  │  "),
+                        Span::styled(
+                            "[PgUp/Dn] ",
+                            Style::default()
+                                .fg(Color::Magenta)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw("Z-Slice  │  "),
+                        Span::styled(
+                            "[T] ",
+                            Style::default()
+                                .fg(Color::Yellow)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw("Chat"),
+                    ]),
+                    Line::from(vec![
+                        Span::styled(
+                            " ⚡ MAINFRAME:     ",
+                            Style::default()
+                                .fg(Color::Rgb(192, 132, 252))
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            "[M] ",
+                            Style::default()
+                                .fg(Color::Cyan)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw("Cycle Mode  │  "),
+                        Span::styled(
+                            "[F1 / ?] ",
+                            Style::default()
+                                .fg(Color::Green)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw("Manual  │  "),
+                        Span::styled(
+                            "[Q] ",
+                            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw("Quit"),
+                    ]),
+                )
+            }
+        }
+        TuiMode::SinglePlayer => (
+            Line::from(vec![
+                Span::styled(
+                    " 🎮 DIFFICULTY:    ",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "[1] ",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("Easy (9x9x3)  "),
+                Span::styled(
+                    "[2] ",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("Med (16x16x4)  "),
+                Span::styled(
+                    "[3] ",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("Exp (30x16x6)  "),
+                Span::styled(
+                    "[4/U] ",
+                    Style::default()
+                        .fg(Color::Magenta)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("Custom Setup  │  "),
+                Span::styled(
+                    "[F3/G] ",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "🏆 Records  │  ",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "[R] ",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "🔄 Restart",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled(
+                    " 🕹️ ACTIONS:       ",
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "[Space/Enter] ",
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("⛏️ Reveal  "),
+                Span::styled(
+                    "[F / X] ",
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("🚩 Flag  "),
+                Span::styled(
+                    "[P] ",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("⏸️ Pause/Resume  "),
+                Span::styled(
+                    "[C] ",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("⚡ Chord  "),
+                Span::styled(
+                    "[WASD] ",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("Move  "),
+                Span::styled(
+                    "[PgUp/Dn / [ ]] ",
+                    Style::default()
+                        .fg(Color::Magenta)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("Z-Slice"),
+            ]),
+            Line::from(vec![
+                Span::styled(
+                    " ⚡ MAINFRAME:     ",
+                    Style::default()
+                        .fg(Color::Rgb(192, 132, 252))
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "[M] ",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("Mode Cycle  "),
+                Span::styled(
+                    "[B] ",
+                    Style::default()
+                        .fg(Color::Rgb(192, 132, 252))
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("AI Bot  "),
+                Span::styled(
+                    "[/] ",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("AI Hint  "),
+                Span::styled(
+                    "[F1 / ?] ",
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("Manual  "),
+                Span::styled(
+                    "[Q] ",
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("Quit"),
+            ]),
         ),
-        Span::raw("Easy (9x9x3, 25m)  "),
-        Span::styled(
-            "[2] ",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("Medium (16x16x4, 160m)  "),
-        Span::styled(
-            "[3] ",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("Expert (30x16x6, 580m)  "),
-        Span::styled(
-            "[4/U] ",
-            Style::default()
-                .fg(Color::Magenta)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("Custom Setup  "),
-        Span::styled(
-            "[R] ",
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("New Game"),
-    ]);
-
-    let line2 = Line::from(vec![
-        Span::styled(
-            " 🕹️ CONTROLS:   ",
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            "[WASD/Arrows] ",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("Move Cursor  "),
-        Span::styled(
-            "[Space/Enter] ",
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("Reveal  "),
-        Span::styled(
-            "[F] ",
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("Flag 🚩  "),
-        Span::styled(
-            "[C] ",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("Chord  "),
-        Span::styled(
-            "[PgUp/PgDn / [ ]] ",
-            Style::default()
-                .fg(Color::Magenta)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("Z-Layer  "),
-        Span::styled(
-            "[B] ",
-            Style::default()
-                .fg(Color::Rgb(192, 132, 252))
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("AI Bot Step"),
-    ]);
-
-    let line3 = Line::from(vec![
-        Span::styled(
-            " ⚡ MAINFRAME:  ",
-            Style::default()
-                .fg(Color::Rgb(192, 132, 252))
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            "[M] ",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("Cycle Mode (SP ⇄ MP ⇄ Host)  "),
-        Span::styled(
-            "[/] ",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("AI Move Hint  "),
-        Span::styled(
-            "[F1 / ? / H] ",
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("Full Keymap Cheatsheet  "),
-        Span::styled(
-            "[Q] ",
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("Quit"),
-    ]);
+    };
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -1376,6 +2247,593 @@ fn render_cyber_footer(f: &mut Frame, _app: &TuiApp, area: Rect) {
     f.render_widget(widget, area);
 }
 
+fn render_tui_host_server_panel(f: &mut Frame, app: &TuiApp, area: Rect) {
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(area);
+
+    let status_badge = if app.server_running {
+        Span::styled(
+            " [ 🟢 ONLINE - LISTENING ] ",
+            Style::default()
+                .fg(Color::Green)
+                .bg(Color::Rgb(10, 35, 20))
+                .add_modifier(Modifier::BOLD),
+        )
+    } else {
+        Span::styled(
+            " [ 🔴 OFFLINE - STOPPED ] ",
+            Style::default()
+                .fg(Color::Red)
+                .bg(Color::Rgb(35, 10, 15))
+                .add_modifier(Modifier::BOLD),
+        )
+    };
+
+    let ctrl_lines = vec![
+        Line::from(vec![Span::raw("")]),
+        Line::from(vec![Span::styled(
+            " 🖥️ EMBEDDED TOKIO WEBSOCKET DAEMON",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )]),
+        Line::from(vec![Span::raw("")]),
+        Line::from(vec![
+            Span::styled(
+                "  • SERVER STATUS : ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            status_badge,
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "  • BIND ADDRESS  : ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("0.0.0.0:{}", app.server_port),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "  • DATABASE URL  : ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("sqlite://minesweeper_tui.db (WAL Persistence)"),
+        ]),
+        Line::from(vec![Span::raw("")]),
+        Line::from(vec![Span::styled(
+            "  【 OPERATIONAL COMMANDS 】",
+            Style::default()
+                .fg(Color::Rgb(167, 139, 250))
+                .add_modifier(Modifier::BOLD),
+        )]),
+        Line::from(vec![
+            Span::styled(
+                "  • [Space / H] : ",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                if app.server_running {
+                    "🛑 Stop Local WebSocket Daemon"
+                } else {
+                    "🚀 Start Local WebSocket Daemon"
+                },
+                Style::default()
+                    .fg(if app.server_running {
+                        Color::Red
+                    } else {
+                        Color::Green
+                    })
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "  • [+ / -] / [W/S]: ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("Adjust Host Listening Port"),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "  • [C]         : ",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("Launch Client & Connect directly to this Host"),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "  • [M]         : ",
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("Cycle Modes (Single Player ⇄ Multiplayer ⇄ Host)"),
+        ]),
+    ];
+
+    let ctrl_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Double)
+        .border_style(Style::default().fg(if app.server_running {
+            Color::Green
+        } else {
+            Color::Yellow
+        }))
+        .title(Span::styled(
+            " ⚙️ HOST DAEMON CONTROL PANEL ",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ));
+    f.render_widget(Paragraph::new(ctrl_lines).block(ctrl_block), chunks[0]);
+
+    // Right: Server Event Logs & Activity
+    let mut log_lines = Vec::new();
+    log_lines.push(Line::from(vec![Span::styled(
+        "SERVER CONSOLE STREAM: ",
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )]));
+    log_lines.push(Line::from(vec![Span::raw("")]));
+    for l in app.logs.iter().rev().take(14) {
+        log_lines.push(Line::from(vec![
+            Span::styled("⚡ ", Style::default().fg(Color::Yellow)),
+            Span::styled(l, Style::default().fg(Color::Rgb(190, 190, 215))),
+        ]));
+    }
+
+    let log_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Rgb(124, 58, 237)))
+        .title(Span::styled(
+            " 📜 LIVE SERVER CONSOLE ",
+            Style::default()
+                .fg(Color::Rgb(167, 139, 250))
+                .add_modifier(Modifier::BOLD),
+        ));
+    f.render_widget(
+        Paragraph::new(log_lines)
+            .block(log_block)
+            .wrap(Wrap { trim: true }),
+        chunks[1],
+    );
+}
+
+fn render_tui_multiplayer_lobby(f: &mut Frame, app: &TuiApp, area: Rect) {
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(area);
+
+    let conn_badge = if app.is_connected {
+        Span::styled(
+            " [ 🟢 CONNECTED ] ",
+            Style::default()
+                .fg(Color::Green)
+                .bg(Color::Rgb(10, 35, 20))
+                .add_modifier(Modifier::BOLD),
+        )
+    } else {
+        Span::styled(
+            " [ 🔴 DISCONNECTED ] ",
+            Style::default()
+                .fg(Color::Red)
+                .bg(Color::Rgb(35, 10, 15))
+                .add_modifier(Modifier::BOLD),
+        )
+    };
+
+    let diff_badge = match app.board_config.difficulty {
+        Difficulty::Easy => "🟢 Beginner (9x9x3, 25 mines)",
+        Difficulty::Medium => "🟡 Intermediate (16x16x4, 160 mines)",
+        Difficulty::Expert => "🔴 Expert (30x16x6, 580 mines)",
+        Difficulty::Custom => "🟣 Custom 3D Möbius Setup",
+    };
+
+    let lobby_lines = vec![
+        Line::from(vec![Span::raw("")]),
+        Line::from(vec![Span::styled(
+            " 🌐 TACTICAL MULTIPLAYER LOBBY",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )]),
+        Line::from(vec![Span::raw("")]),
+        Line::from(vec![
+            Span::styled(
+                "  • SERVER STATUS  : ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            conn_badge,
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "  • SERVER URL     : ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(&app.server_url, Style::default().fg(Color::White)),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "  • CALLSIGN / ID  : ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                &app.player_name,
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "  • ROOM DIFFICULTY: ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                diff_badge,
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(vec![Span::raw("")]),
+        Line::from(vec![Span::styled(
+            "  【 MULTIPLAYER COMMANDS 】",
+            Style::default()
+                .fg(Color::Rgb(167, 139, 250))
+                .add_modifier(Modifier::BOLD),
+        )]),
+        Line::from(vec![
+            Span::styled(
+                "  • [N]         : ",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("Connect / Reconnect WebSocket Session"),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "  • [C / Enter] : ",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "🏠 Create Match Room with Selected Difficulty",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "  • [1 / 2 / 3] : ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("Select Easy / Medium / Expert Preset"),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "  • [4 / U]     : ",
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("Configure Custom 3D Dimensions & Mines"),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "  • [M]         : ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("Switch Modes (SP ⇄ MP ⇄ Host Server)"),
+        ]),
+    ];
+
+    let lobby_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Double)
+        .border_style(Style::default().fg(if app.is_connected {
+            Color::Green
+        } else {
+            Color::Cyan
+        }))
+        .title(Span::styled(
+            " 🏠 MULTIPLAYER TERMINAL LOBBY ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ));
+    f.render_widget(Paragraph::new(lobby_lines).block(lobby_block), chunks[0]);
+
+    // Right: Transmission Log & Instructions
+    let mut feed_lines = vec![
+        Line::from(vec![Span::styled(
+            "📖 MULTIPLAYER BRIEFING & PROTOCOLS:",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )]),
+        Line::from(vec![Span::raw("")]),
+        Line::from(vec![
+            Span::styled("1. ", Style::default().fg(Color::Cyan)),
+            Span::raw("Start local server with [M] (Host Mode) or press [N] to connect."),
+        ]),
+        Line::from(vec![
+            Span::styled("2. ", Style::default().fg(Color::Cyan)),
+            Span::raw("Press [C] or [Enter] to instantiate your match room."),
+        ]),
+        Line::from(vec![
+            Span::styled("3. ", Style::default().fg(Color::Cyan)),
+            Span::raw("Invite other terminals or spawn AI Bots with [B]."),
+        ]),
+        Line::from(vec![
+            Span::styled("4. ", Style::default().fg(Color::Cyan)),
+            Span::raw("Toggle ready with [Tab] to trigger synchronized match start!"),
+        ]),
+        Line::from(vec![Span::raw("")]),
+        Line::from(vec![Span::styled(
+            "TRANSMISSION FEED: ",
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        )]),
+    ];
+    for l in app.logs.iter().rev().take(8) {
+        feed_lines.push(Line::from(vec![
+            Span::styled("• ", Style::default().fg(Color::DarkGray)),
+            Span::styled(l, Style::default().fg(Color::Rgb(180, 180, 200))),
+        ]));
+    }
+
+    let feed_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Rgb(124, 58, 237)))
+        .title(Span::styled(
+            " 📡 NETWORK FEED & LOGS ",
+            Style::default()
+                .fg(Color::Rgb(167, 139, 250))
+                .add_modifier(Modifier::BOLD),
+        ));
+    f.render_widget(
+        Paragraph::new(feed_lines)
+            .block(feed_block)
+            .wrap(Wrap { trim: true }),
+        chunks[1],
+    );
+}
+
+fn render_tui_multiplayer_cockpit(f: &mut Frame, app: &TuiApp, area: Rect) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(6),
+            Constraint::Length(7),
+            Constraint::Min(6),
+        ])
+        .split(area);
+
+    // 1. Room Status & Config
+    let ready_badge = if app.mp_ready {
+        Span::styled(
+            " [ ✅ READY ] ",
+            Style::default()
+                .fg(Color::Green)
+                .bg(Color::Rgb(10, 35, 20))
+                .add_modifier(Modifier::BOLD),
+        )
+    } else {
+        Span::styled(
+            " [ ⏳ NOT READY ] ",
+            Style::default()
+                .fg(Color::Yellow)
+                .bg(Color::Rgb(35, 30, 10))
+                .add_modifier(Modifier::BOLD),
+        )
+    };
+
+    let room_lines = vec![
+        Line::from(vec![
+            Span::styled(
+                "ROOM:   ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("{}'s TUI Match", app.player_name),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("STATUS: ", Style::default().fg(Color::Yellow)),
+            ready_badge,
+            Span::styled(
+                format!(" (Bot delay: {}ms)", app.bot_speed_ms),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("BOARD:  ", Style::default().fg(Color::Magenta)),
+            Span::raw(format!(
+                "{}x{}x{}, {} mines",
+                app.board.dims.width,
+                app.board.dims.height,
+                app.board.dims.depth,
+                app.board_config.mines
+            )),
+        ]),
+    ];
+    let room_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(" 🏠 Match Room Info ");
+    f.render_widget(Paragraph::new(room_lines).block(room_block), chunks[0]);
+
+    // 2. Players & Bots Roster
+    let mut roster_lines = Vec::new();
+    roster_lines.push(Line::from(vec![Span::styled(
+        "OPERATIVE ROSTER: ",
+        Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD),
+    )]));
+    if app.room_players.is_empty() {
+        roster_lines.push(Line::from(vec![
+            Span::styled(
+                format!("  👤 {} (You)", app.player_name),
+                Style::default().fg(Color::White),
+            ),
+            Span::raw(" │ "),
+            if app.mp_ready {
+                Span::styled("✅ READY", Style::default().fg(Color::Green))
+            } else {
+                Span::styled("⏳ UNREADY", Style::default().fg(Color::Yellow))
+            },
+        ]));
+    } else {
+        for p in &app.room_players {
+            let icon = if p.is_bot { "🤖" } else { "👤" };
+            let status = if p.is_ready {
+                "✅ READY"
+            } else {
+                "⏳ WAITING"
+            };
+            roster_lines.push(Line::from(vec![
+                Span::styled(
+                    format!("  {} {:<12} ", icon, p.username),
+                    Style::default().fg(Color::White),
+                ),
+                Span::styled(
+                    status,
+                    Style::default().fg(if p.is_ready {
+                        Color::Green
+                    } else {
+                        Color::Yellow
+                    }),
+                ),
+            ]));
+        }
+    }
+    let roster_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Green))
+        .title(" 👥 Operatives & Bots ");
+    f.render_widget(Paragraph::new(roster_lines).block(roster_block), chunks[1]);
+
+    // 3. Match Commands & Transmission Stream
+    let mut cmd_lines = vec![
+        Line::from(vec![
+            Span::styled(
+                "• [Tab]  : ",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("Toggle Ready / Unready"),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "• [B]    : ",
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("Add AI Bot (Turing)"),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "• [+/-]  : ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("Adjust Bot Decision Speed"),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "• [K]    : ",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("Kick First Bot"),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "• [T]    : ",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("Send Tactical Chat"),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "• [L]    : ",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("Leave Room"),
+        ]),
+        Line::from(vec![Span::raw("")]),
+    ];
+    for l in app.logs.iter().rev().take(4) {
+        cmd_lines.push(Line::from(vec![
+            Span::styled("• ", Style::default().fg(Color::DarkGray)),
+            Span::styled(l, Style::default().fg(Color::Rgb(180, 180, 200))),
+        ]));
+    }
+    let cmd_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Rgb(124, 58, 237)))
+        .title(" 🕹️ Multiplayer Commands & Feed ");
+    f.render_widget(
+        Paragraph::new(cmd_lines)
+            .block(cmd_block)
+            .wrap(Wrap { trim: true }),
+        chunks[2],
+    );
+}
+
 fn render_help_modal(f: &mut Frame, _app: &TuiApp, area: Rect) {
     let popup_w = 72.min(area.width.saturating_sub(4));
     let popup_h = 24.min(area.height.saturating_sub(4));
@@ -1388,82 +2846,30 @@ fn render_help_modal(f: &mut Frame, _app: &TuiApp, area: Rect) {
 
     let lines = vec![
         Line::from(vec![Span::styled(
-            "═══ 🌌 3D MÖBIUS MINESWEEPER: COMPLETE COMMAND MANUAL ═══",
+            "⚡ 3D MÖBIUS MINESWEEPER // OPERATIONAL TACTICAL MANUAL",
             Style::default()
-                .fg(Color::Rgb(192, 132, 252))
-                .add_modifier(Modifier::BOLD),
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
         )]),
         Line::from(vec![Span::raw("")]),
         Line::from(vec![Span::styled(
-            "【 1. DIFFICULTY & BOARD GENERATION 】",
+            "【 1. TOPOLOGY & NAVIGATION 】",
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         )]),
         Line::from(vec![
             Span::styled(
-                "  • [1] : ",
+                "  • [W/A/S/D] or [Arrows] : ",
                 Style::default()
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::raw("Beginner Preset (9 x 9 x 3 grid, 25 mines, ~10.3% density)"),
+            Span::raw("Move 2D cursor along the active (X, Y) slice"),
         ]),
         Line::from(vec![
             Span::styled(
-                "  • [2] : ",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("Intermediate Preset (16 x 16 x 4 grid, 160 mines, ~15.6% density)"),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "  • [3] : ",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("Expert Preset (30 x 16 x 6 grid, 580 mines, ~20.1% density)"),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "  • [4] / [U] : ",
-                Style::default()
-                    .fg(Color::Magenta)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("Custom Setup (Configure W [4-60], H [4-40], D [1-16], Mines)"),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "  • [R] : ",
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("Re-initialize and start a new game with first-click safety"),
-        ]),
-        Line::from(vec![Span::raw("")]),
-        Line::from(vec![Span::styled(
-            "【 2. NAVIGATION & TACTICAL ACTIONS 】",
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD),
-        )]),
-        Line::from(vec![
-            Span::styled(
-                "  • [WASD / Arrows] : ",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("Move cursor across current 2D layer"),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "  • [PgUp/PgDn / [ / ]] : ",
+                "  • [PgUp/PgDn] or [ / ]  : ",
                 Style::default()
                     .fg(Color::Magenta)
                     .add_modifier(Modifier::BOLD),
@@ -1481,23 +2887,41 @@ fn render_help_modal(f: &mut Frame, _app: &TuiApp, area: Rect) {
         ]),
         Line::from(vec![
             Span::styled(
-                "  • [F] : ",
+                "  • [F] / [X] : ",
                 Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
             ),
-            Span::raw("Toggle flag 🚩 on unrevealed tile"),
+            Span::raw("Toggle flag 🚩 on unrevealed tile (Single & Multiplayer)"),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "  • [P] : ",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("(SP) Pause/Resume timer & anti-cheat hide grid / (MP) Create Room"),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "  • [R] : ",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("Restart single player game with safe first-click"),
         ]),
         Line::from(vec![
             Span::styled(
                 "  • [C] : ",
                 Style::default()
-                    .fg(Color::Yellow)
+                    .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::raw("Chord / clear adjacent safe tiles when flags match number"),
+            Span::raw("Chord adjacent safe cells (or Create Room in MP Lobby)"),
         ]),
         Line::from(vec![Span::raw("")]),
         Line::from(vec![Span::styled(
-            "【 3. AI SPARRING & NETWORK MODES 】",
+            "【 2. AI SPARRING & NETWORK MODES 】",
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
@@ -1518,7 +2942,7 @@ fn render_help_modal(f: &mut Frame, _app: &TuiApp, area: Rect) {
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::raw("Calculate AI hint & mathematical deduction without clicking"),
+            Span::raw("Calculate AI hint without modifying board"),
         ]),
         Line::from(vec![
             Span::styled(
@@ -1531,21 +2955,30 @@ fn render_help_modal(f: &mut Frame, _app: &TuiApp, area: Rect) {
         ]),
         Line::from(vec![
             Span::styled(
-                "  • [H] : ",
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("(Host Mode) Toggle start/stop local WebSocket daemon (:3000)"),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "  • [N] / [P] : ",
+                "  • [Tab] / [L] : ",
                 Style::default()
                     .fg(Color::Green)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::raw("(Multiplayer Mode) Connect to WebSocket / Create Game Room"),
+            Span::raw("(MP) Toggle Ready status / Leave room"),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "  • [T] / [+/-] / [K] : ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("(MP) Send Chat / Adjust bot speed / Kick AI bot"),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "  • [N] / [H] : ",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("(MP) Connect WebSocket / (Host) Toggle local server"),
         ]),
         Line::from(vec![
             Span::styled(
@@ -1571,6 +3004,194 @@ fn render_help_modal(f: &mut Frame, _app: &TuiApp, area: Rect) {
             " 📖 TACTICAL MAINFRAME MANUAL [F1] ",
             Style::default()
                 .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ));
+
+    f.render_widget(ratatui::widgets::Clear, popup_area);
+    f.render_widget(Paragraph::new(lines).block(block), popup_area);
+}
+
+fn render_tui_pb_modal(f: &mut Frame, app: &TuiApp, area: Rect) {
+    let popup_w = 72.min(area.width.saturating_sub(4));
+    let popup_h = 16.min(area.height.saturating_sub(4));
+    let popup_area = Rect::new(
+        area.x + (area.width.saturating_sub(popup_w)) / 2,
+        area.y + (area.height.saturating_sub(popup_h)) / 2,
+        popup_w,
+        popup_h,
+    );
+
+    let mut lines = vec![
+        Line::from(vec![Span::styled(
+            "🏆 3D MÖBIUS MINESWEEPER // PERSONAL BEST RECORDS",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+        )]),
+        Line::from(vec![Span::raw("")]),
+    ];
+
+    let diffs = [
+        (Difficulty::Easy, "🟢 Beginner (9x9x3, 25 mines):"),
+        (Difficulty::Medium, "🟡 Intermediate (16x16x4, 160 mines):"),
+        (Difficulty::Expert, "🔴 Expert (30x16x6, 580 mines):"),
+        (Difficulty::Custom, "⚙️ Custom Configuration:"),
+    ];
+
+    for (d, name) in diffs {
+        if let Some(r) = app.pb_records.get_pb(d) {
+            lines.push(Line::from(vec![
+                Span::styled(format!("{:<38} ", name), Style::default().fg(Color::Cyan)),
+                Span::styled(
+                    format!("⚡ {:>3}s ", r.time_secs),
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("({:>3} moves) ", r.moves),
+                    Style::default().fg(Color::White),
+                ),
+                Span::styled(
+                    format!("[{}]", r.date),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]));
+        } else {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("{:<38} ", name),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::styled("No Record Yet", Style::default().fg(Color::DarkGray)),
+            ]));
+        }
+    }
+
+    lines.push(Line::from(vec![Span::raw("")]));
+    lines.push(Line::from(vec![Span::styled(
+        "Press [Esc], [G], [Enter], or [Space] to close records",
+        Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD),
+    )]));
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Double)
+        .border_style(Style::default().fg(Color::Yellow))
+        .title(Span::styled(
+            " 🏆 PERSONAL BESTS & HALL OF FAME [F3 / G] ",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ));
+
+    f.render_widget(ratatui::widgets::Clear, popup_area);
+    f.render_widget(Paragraph::new(lines).block(block), popup_area);
+}
+
+fn render_tui_settlement_modal(
+    f: &mut Frame,
+    winners: &[String],
+    final_scores: &[ScoreDelta],
+    area: Rect,
+) {
+    let popup_w = 72.min(area.width.saturating_sub(4));
+    let popup_h = (12 + final_scores.len() as u16).min(area.height.saturating_sub(4));
+    let popup_area = Rect::new(
+        area.x + (area.width.saturating_sub(popup_w)) / 2,
+        area.y + (area.height.saturating_sub(popup_h)) / 2,
+        popup_w,
+        popup_h,
+    );
+
+    let winner_str = if winners.is_empty() {
+        "None (All Operatives Eliminated)".into()
+    } else {
+        winners.join(", ")
+    };
+
+    let mut lines = vec![
+        Line::from(vec![Span::styled(
+            "🏁 MULTIPLAYER MATCH CONCLUDED // FINAL SETTLEMENT",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+        )]),
+        Line::from(vec![Span::raw("")]),
+        Line::from(vec![
+            Span::styled(
+                "🏆 MATCH WINNER(S): ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                winner_str,
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(vec![Span::raw("")]),
+        Line::from(vec![Span::styled(
+            format!(
+                "{:<6} {:<26} {:<14} {:<12}",
+                "RANK", "OPERATIVE", "SCORE", "DELTA"
+            ),
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        )]),
+        Line::from(vec![Span::styled(
+            "──────────────────────────────────────────────────────────────────",
+            Style::default().fg(Color::DarkGray),
+        )]),
+    ];
+
+    for (idx, score) in final_scores.iter().enumerate() {
+        let rank = match idx {
+            0 => "🥇 1st",
+            1 => "🥈 2nd",
+            2 => "🥉 3rd",
+            _ => "  -  ",
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!("{:<6} ", rank), Style::default().fg(Color::Yellow)),
+            Span::styled(
+                format!("{:<26} ", score.player_id),
+                Style::default().fg(Color::White),
+            ),
+            Span::styled(
+                format!("{:>6} pts      ", score.total_score),
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("+{:>4} pts", score.points),
+                Style::default().fg(Color::Cyan),
+            ),
+        ]));
+    }
+
+    lines.push(Line::from(vec![Span::raw("")]));
+    lines.push(Line::from(vec![Span::styled(
+        "• [S] : 🚀 LAUNCH NEXT MATCH   • [Esc/Enter] : DISMISS",
+        Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD),
+    )]));
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Double)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(Span::styled(
+            " 🏁 MULTIPLAYER MATCH SETTLEMENT & PODIUM ",
+            Style::default()
+                .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ));
 

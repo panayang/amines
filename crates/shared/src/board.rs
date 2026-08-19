@@ -394,6 +394,12 @@ impl Board {
         let non_mine_total = self.dims.total_cells() - self.config.mines;
         if self.revealed_count >= non_mine_total {
             self.status = GameStatus::Won;
+            for cell in self.cells.iter_mut() {
+                if cell.is_mine {
+                    cell.is_flagged = true;
+                }
+            }
+            self.flag_count = self.config.mines;
         }
 
         if first_click {
@@ -474,6 +480,100 @@ impl Board {
 
     pub fn is_lost(&self) -> bool {
         self.status == GameStatus::Lost
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PbRecord {
+    pub time_secs: u64,
+    pub moves: u32,
+    pub date: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LocalPersonalBests {
+    pub easy: Option<PbRecord>,
+    pub medium: Option<PbRecord>,
+    pub expert: Option<PbRecord>,
+    pub custom: Option<PbRecord>,
+}
+
+impl LocalPersonalBests {
+    pub fn from_json_str(s: &str) -> Option<Self> {
+        serde_json::from_str(s).ok()
+    }
+
+    pub fn to_json_str(&self) -> String {
+        serde_json::to_string_pretty(self).unwrap_or_default()
+    }
+
+    pub fn load_or_default() -> Self {
+        if let Some(home) = std::env::var_os("HOME") {
+            let path = std::path::Path::new(&home).join(".amine_pb.json");
+            if let Ok(data) = std::fs::read_to_string(&path) {
+                if let Ok(pb) = serde_json::from_str::<Self>(&data) {
+                    return pb;
+                }
+            }
+        }
+        Self::default()
+    }
+
+    pub fn save(&self) {
+        if let Some(home) = std::env::var_os("HOME") {
+            let path = std::path::Path::new(&home).join(".amine_pb.json");
+            if let Ok(data) = serde_json::to_string_pretty(self) {
+                let _ = std::fs::write(path, data);
+            }
+        }
+    }
+
+    pub fn get_pb(&self, diff: Difficulty) -> Option<&PbRecord> {
+        match diff {
+            Difficulty::Easy => self.easy.as_ref(),
+            Difficulty::Medium => self.medium.as_ref(),
+            Difficulty::Expert => self.expert.as_ref(),
+            Difficulty::Custom => self.custom.as_ref(),
+        }
+    }
+
+    pub fn update_if_best(&mut self, diff: Difficulty, time_secs: u64, moves: u32) -> bool {
+        let now_str = chrono::Utc::now().format("%Y-%m-%d %H:%M").to_string();
+        let target = match diff {
+            Difficulty::Easy => &mut self.easy,
+            Difficulty::Medium => &mut self.medium,
+            Difficulty::Expert => &mut self.expert,
+            Difficulty::Custom => &mut self.custom,
+        };
+
+        let is_new = match target {
+            Some(curr) => {
+                if time_secs < curr.time_secs || (time_secs == curr.time_secs && moves < curr.moves)
+                {
+                    *curr = PbRecord {
+                        time_secs,
+                        moves,
+                        date: now_str,
+                    };
+                    true
+                } else {
+                    false
+                }
+            }
+            None => {
+                *target = Some(PbRecord {
+                    time_secs,
+                    moves,
+                    date: now_str,
+                });
+                true
+            }
+        };
+
+        if is_new {
+            self.save();
+        }
+        is_new
     }
 }
 

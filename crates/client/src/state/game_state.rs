@@ -1,13 +1,16 @@
 use gloo_net::http::Request;
+use gloo_storage::{LocalStorage, Storage};
 use gloo_timers::future::TimeoutFuture;
 use leptos::prelude::*;
 use shared::ai_solver::{AiAction, AiSolver, BotTier};
-use shared::board::{Board, BoardConfig, GameStatus};
+use shared::board::{Board, BoardConfig, GameStatus, LocalPersonalBests};
 use shared::protocol::*;
 use shared::topology::Coord3D;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::{CloseEvent, MessageEvent, WebSocket};
+
+const STORAGE_KEY_PB: &str = "amine_local_pb";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppMode {
@@ -53,10 +56,22 @@ pub struct GameState {
     pub set_sp_moves: WriteSignal<u32>,
     pub sp_is_timer_running: ReadSignal<bool>,
     pub set_sp_is_timer_running: WriteSignal<bool>,
+    pub sp_is_paused: ReadSignal<bool>,
+    pub set_sp_is_paused: WriteSignal<bool>,
+    pub sp_victory_modal: ReadSignal<bool>,
+    pub set_sp_victory_modal: WriteSignal<bool>,
+    pub sp_is_new_pb: ReadSignal<bool>,
+    pub set_sp_is_new_pb: WriteSignal<bool>,
+    pub sp_pb_records: ReadSignal<LocalPersonalBests>,
+    pub set_sp_pb_records: WriteSignal<LocalPersonalBests>,
     pub custom_config: ReadSignal<BoardConfig>,
     pub set_custom_config: WriteSignal<BoardConfig>,
     pub hint_coord: ReadSignal<Option<Coord3D>>,
     pub set_hint_coord: WriteSignal<Option<Coord3D>>,
+    pub is_flag_mode: ReadSignal<bool>,
+    pub set_is_flag_mode: WriteSignal<bool>,
+    pub hovered_coord: ReadSignal<Option<Coord3D>>,
+    pub set_hovered_coord: WriteSignal<Option<Coord3D>>,
 
     // Multiplayer State
     pub mp_room: ReadSignal<Option<RoomSnapshot>>,
@@ -82,10 +97,21 @@ impl GameState {
         let (sp_config, set_sp_config) = signal(initial_config);
         let (custom_config, set_custom_config) = signal(default_custom);
         let (hint_coord, set_hint_coord) = signal(None::<Coord3D>);
+        let (is_flag_mode, set_is_flag_mode) = signal(false);
+        let (hovered_coord, set_hovered_coord) = signal(None::<Coord3D>);
         let (sp_current_layer, set_sp_current_layer) = signal(0);
         let (sp_time, set_sp_time) = signal(0u64);
         let (sp_moves, set_sp_moves) = signal(0u32);
         let (sp_is_timer_running, set_sp_is_timer_running) = signal(false);
+        let (sp_is_paused, set_sp_is_paused) = signal(false);
+        let (sp_victory_modal, set_sp_victory_modal) = signal(false);
+        let (sp_is_new_pb, set_sp_is_new_pb) = signal(false);
+
+        let initial_pb = LocalStorage::get::<String>(STORAGE_KEY_PB)
+            .ok()
+            .and_then(|s| LocalPersonalBests::from_json_str(&s))
+            .unwrap_or_default();
+        let (sp_pb_records, set_sp_pb_records) = signal(initial_pb);
 
         let (mp_room, set_mp_room) = signal(None::<RoomSnapshot>);
         let (mp_current_layer, set_mp_current_layer) = signal(0);
@@ -109,10 +135,22 @@ impl GameState {
             set_sp_moves,
             sp_is_timer_running,
             set_sp_is_timer_running,
+            sp_is_paused,
+            set_sp_is_paused,
+            sp_victory_modal,
+            set_sp_victory_modal,
+            sp_is_new_pb,
+            set_sp_is_new_pb,
+            sp_pb_records,
+            set_sp_pb_records,
             custom_config,
             set_custom_config,
             hint_coord,
             set_hint_coord,
+            is_flag_mode,
+            set_is_flag_mode,
+            hovered_coord,
+            set_hovered_coord,
             mp_room,
             set_mp_room,
             mp_current_layer,
@@ -128,11 +166,12 @@ impl GameState {
 
         // Start SP timer loop
         let is_running_sig = state.sp_is_timer_running;
+        let is_paused_sig = state.sp_is_paused;
         let set_time_sig = state.set_sp_time;
         wasm_bindgen_futures::spawn_local(async move {
             loop {
                 TimeoutFuture::new(1000).await;
-                if is_running_sig.get() {
+                if is_running_sig.get() && !is_paused_sig.get() {
                     set_time_sig.update(|t| *t += 1);
                 }
             }
@@ -156,6 +195,14 @@ impl GameState {
         self.set_sp_time.set(0);
         self.set_sp_moves.set(0);
         self.set_sp_is_timer_running.set(false);
+        self.set_sp_is_paused.set(false);
+        self.set_sp_victory_modal.set(false);
+    }
+
+    pub fn sp_toggle_pause(&self) {
+        if self.sp_board.get().status == GameStatus::Playing || self.sp_is_timer_running.get() {
+            self.set_sp_is_paused.update(|p| *p = !*p);
+        }
     }
 
     pub fn step_layer(&self, delta: i32) {
@@ -192,6 +239,9 @@ impl GameState {
 
     // --- Single-Player Logic ---
     pub fn sp_reveal(&self, coord: Coord3D, auth_token: Option<String>) {
+        if self.sp_is_paused.get() {
+            return;
+        }
         let mut board = self.sp_board.get();
         if board.status == GameStatus::Won || board.status == GameStatus::Lost {
             return;
@@ -206,9 +256,18 @@ impl GameState {
 
         if board.is_won() {
             self.set_sp_is_timer_running.set(false);
+            self.set_sp_is_paused.set(false);
             let time_ms = self.sp_time.get() * 1000;
+            let elapsed = self.sp_time.get();
             let moves = self.sp_moves.get();
             let config = self.sp_config.get();
+
+            let mut pbs = self.sp_pb_records.get();
+            let is_new = pbs.update_if_best(config.difficulty, elapsed, moves);
+            let _ = LocalStorage::set(STORAGE_KEY_PB, pbs.to_json_str());
+            self.set_sp_pb_records.set(pbs);
+            self.set_sp_is_new_pb.set(is_new);
+            self.set_sp_victory_modal.set(true);
 
             if let Some(tok) = auth_token {
                 let req_payload = PbRecordRequest {
@@ -228,12 +287,16 @@ impl GameState {
             }
         } else if board.is_lost() {
             self.set_sp_is_timer_running.set(false);
+            self.set_sp_is_paused.set(false);
         }
 
         self.set_sp_board.set(board);
     }
 
     pub fn sp_toggle_flag(&self, coord: Coord3D) {
+        if self.sp_is_paused.get() {
+            return;
+        }
         let mut board = self.sp_board.get();
         if board.status == GameStatus::Won || board.status == GameStatus::Lost {
             return;
@@ -245,6 +308,9 @@ impl GameState {
     }
 
     pub fn sp_chord(&self, coord: Coord3D, auth_token: Option<String>) {
+        if self.sp_is_paused.get() {
+            return;
+        }
         let mut board = self.sp_board.get();
         if board.status == GameStatus::Won || board.status == GameStatus::Lost {
             return;
@@ -256,8 +322,16 @@ impl GameState {
         if board.is_won() {
             self.set_sp_is_timer_running.set(false);
             let time_ms = self.sp_time.get() * 1000;
+            let elapsed = self.sp_time.get();
             let moves = self.sp_moves.get();
             let config = self.sp_config.get();
+
+            let mut pbs = self.sp_pb_records.get();
+            let is_new = pbs.update_if_best(config.difficulty, elapsed, moves);
+            let _ = LocalStorage::set(STORAGE_KEY_PB, pbs.to_json_str());
+            self.set_sp_pb_records.set(pbs);
+            self.set_sp_is_new_pb.set(is_new);
+            self.set_sp_victory_modal.set(true);
 
             if let Some(tok) = auth_token {
                 let req_payload = PbRecordRequest {

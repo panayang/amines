@@ -60,6 +60,15 @@ pub fn t(lang: Language, key: &str) -> &str {
             "hud_copy_code" => "Copy Code",
             "hud_copied" => "Copied!",
             "hud_score" => "Score",
+            "tool_dig" => "⛏️ Dig Mode",
+            "tool_flag" => "🚩 Flag Mode",
+            "hud_pause" => "Pause",
+            "hud_resume" => "Resume",
+            "status_paused" => "Game Paused // Click or Press [P] to Resume",
+            "mobile_prev_layer" => "◄ Prev (Z-)",
+            "mobile_next_layer" => "Next (Z+) ►",
+            "mp_leave_room" => "Leave Room",
+            "mp_create_match" => "Create Match",
 
             // Mobius & Slice Guides
             "guide_mobius_left" => "Möbius Seam Left (Inverts Y & Z)",
@@ -193,6 +202,15 @@ pub fn t(lang: Language, key: &str) -> &str {
             "hud_copy_code" => "复制房间号",
             "hud_copied" => "已复制!",
             "hud_score" => "得分",
+            "tool_dig" => "⛏️ 翻开模式",
+            "tool_flag" => "🚩 插旗模式",
+            "hud_pause" => "暂停",
+            "hud_resume" => "继续",
+            "status_paused" => "游戏已暂停 // 点击或按 [P] 键恢复",
+            "mobile_prev_layer" => "◄ 上一层 (Z-)",
+            "mobile_next_layer" => "下一层 (Z+) ►",
+            "mp_leave_room" => "离开房间",
+            "mp_create_match" => "创建对局",
 
             // Mobius & Slice Guides
             "guide_mobius_left" => "莫比乌斯环左边界 (Y/Z 双重反转)",

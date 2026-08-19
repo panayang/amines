@@ -8,6 +8,8 @@ pub mod layer_nav;
 pub mod lobby;
 pub mod navbar;
 
+pub mod sp_victory_modal;
+
 pub use auth_modal::AuthModal;
 pub use board::BoardView;
 pub use chat::Chat;
@@ -17,3 +19,4 @@ pub use hud::Hud;
 pub use layer_nav::LayerNav;
 pub use lobby::Lobby;
 pub use navbar::Navbar;
+pub use sp_victory_modal::SpVictoryModal;

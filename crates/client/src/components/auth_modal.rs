@@ -8,9 +8,11 @@ use shared::protocol::{AuthRequest, AuthResponse};
 pub fn AuthModal(
     i18n: I18nContext,
     auth: AuthState,
+    game: crate::state::game_state::GameState,
     is_open: ReadSignal<bool>,
     set_open: WriteSignal<bool>,
     show_stats_first: ReadSignal<bool>,
+    set_show_stats_first: WriteSignal<bool>,
 ) -> impl IntoView {
     let (is_register_tab, set_is_register_tab) = signal(false);
     let (username_input, set_username_input) = signal("".to_string());
@@ -110,55 +112,106 @@ pub fn AuthModal(
                         </div>
 
                         <div class="modal-body">
-                            {if show_stats && is_logged {
-                                // User stats panel
-                                let stats = auth.stats.get();
-                                view! {
-                                    <div style="display: flex; flex-direction: column; gap: 10px;">
-                                        <div style="font-size: 16px; font-weight: 700; color: var(--primary);">
-                                            "👤 " {auth.username.get().unwrap_or_default()}
-                                        </div>
+                            {if show_stats {
+                                if is_logged {
+                                    // User cloud stats panel
+                                    let stats = auth.stats.get();
+                                    view! {
+                                        <div style="display: flex; flex-direction: column; gap: 10px;">
+                                            <div style="font-size: 16px; font-weight: 700; color: var(--primary);">
+                                                "👤 " {auth.username.get().unwrap_or_default()}
+                                            </div>
 
-                                        <div style="background: var(--bg-card-subtle); padding: 12px; border-radius: var(--radius-sm); border: 1px solid var(--border-color);">
-                                            <div style="font-weight: 700; font-size: 13px; margin-bottom: 8px; color: var(--accent-gold);">
-                                                "🏆 " {move || i18n.tr("hud_pb")}
+                                            <div style="background: var(--bg-card-subtle); padding: 12px; border-radius: var(--radius-sm); border: 1px solid var(--border-color);">
+                                                <div style="font-weight: 700; font-size: 13px; margin-bottom: 8px; color: var(--accent-gold);">
+                                                    "🏆 " {move || i18n.tr("hud_pb")}
+                                                </div>
+                                                <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; text-align: center;">
+                                                    <div style="background: var(--bg-elevated); padding: 6px; border-radius: 4px;">
+                                                        <div style="font-size: 11px; color: var(--text-muted);">{move || i18n.tr("diff_easy")}</div>
+                                                        <div style="font-family: var(--font-mono); font-weight: 700; color: var(--primary);">{format_pb(stats.as_ref().and_then(|s| s.easy_pb_ms))}</div>
+                                                    </div>
+                                                    <div style="background: var(--bg-elevated); padding: 6px; border-radius: 4px;">
+                                                        <div style="font-size: 11px; color: var(--text-muted);">{move || i18n.tr("diff_medium")}</div>
+                                                        <div style="font-family: var(--font-mono); font-weight: 700; color: var(--primary);">{format_pb(stats.as_ref().and_then(|s| s.medium_pb_ms))}</div>
+                                                    </div>
+                                                    <div style="background: var(--bg-elevated); padding: 6px; border-radius: 4px;">
+                                                        <div style="font-size: 11px; color: var(--text-muted);">{move || i18n.tr("diff_expert")}</div>
+                                                        <div style="font-family: var(--font-mono); font-weight: 700; color: var(--primary);">{format_pb(stats.as_ref().and_then(|s| s.expert_pb_ms))}</div>
+                                                    </div>
+                                                </div>
                                             </div>
-                                            <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; text-align: center;">
-                                                <div style="background: var(--bg-elevated); padding: 6px; border-radius: 4px;">
-                                                    <div style="font-size: 11px; color: var(--text-muted);">{move || i18n.tr("diff_easy")}</div>
-                                                    <div style="font-family: var(--font-mono); font-weight: 700; color: var(--primary);">{format_pb(stats.as_ref().and_then(|s| s.easy_pb_ms))}</div>
-                                                </div>
-                                                <div style="background: var(--bg-elevated); padding: 6px; border-radius: 4px;">
-                                                    <div style="font-size: 11px; color: var(--text-muted);">{move || i18n.tr("diff_medium")}</div>
-                                                    <div style="font-family: var(--font-mono); font-weight: 700; color: var(--primary);">{format_pb(stats.as_ref().and_then(|s| s.medium_pb_ms))}</div>
-                                                </div>
-                                                <div style="background: var(--bg-elevated); padding: 6px; border-radius: 4px;">
-                                                    <div style="font-size: 11px; color: var(--text-muted);">{move || i18n.tr("diff_expert")}</div>
-                                                    <div style="font-family: var(--font-mono); font-weight: 700; color: var(--primary);">{format_pb(stats.as_ref().and_then(|s| s.expert_pb_ms))}</div>
-                                                </div>
-                                            </div>
-                                        </div>
 
-                                        <div style="background: var(--bg-card-subtle); padding: 12px; border-radius: var(--radius-sm); border: 1px solid var(--border-color); display: flex; justify-content: space-around; text-align: center;">
-                                            <div>
-                                                <div style="font-size: 11px; color: var(--text-muted);">"SP Games"</div>
-                                                <div style="font-family: var(--font-mono); font-weight: 700;">{stats.as_ref().map(|s| s.sp_games_played).unwrap_or(0)}</div>
+                                            <div style="background: var(--bg-card-subtle); padding: 12px; border-radius: var(--radius-sm); border: 1px solid var(--border-color); display: flex; justify-content: space-around; text-align: center;">
+                                                <div>
+                                                    <div style="font-size: 11px; color: var(--text-muted);">"SP Games"</div>
+                                                    <div style="font-family: var(--font-mono); font-weight: 700;">{stats.as_ref().map(|s| s.sp_games_played).unwrap_or(0)}</div>
+                                                </div>
+                                                <div>
+                                                    <div style="font-size: 11px; color: var(--text-muted);">"MP Wins"</div>
+                                                    <div style="font-family: var(--font-mono); font-weight: 700; color: var(--success);">{stats.as_ref().map(|s| s.mp_games_won).unwrap_or(0)}</div>
+                                                </div>
+                                                <div>
+                                                    <div style="font-size: 11px; color: var(--text-muted);">"MP Total Score"</div>
+                                                    <div style="font-family: var(--font-mono); font-weight: 700; color: var(--primary);">{stats.as_ref().map(|s| s.mp_total_score).unwrap_or(0)}</div>
+                                                </div>
                                             </div>
-                                            <div>
-                                                <div style="font-size: 11px; color: var(--text-muted);">"MP Wins"</div>
-                                                <div style="font-family: var(--font-mono); font-weight: 700; color: var(--success);">{stats.as_ref().map(|s| s.mp_games_won).unwrap_or(0)}</div>
-                                            </div>
-                                            <div>
-                                                <div style="font-size: 11px; color: var(--text-muted);">"MP Total Score"</div>
-                                                <div style="font-family: var(--font-mono); font-weight: 700; color: var(--primary);">{stats.as_ref().map(|s| s.mp_total_score).unwrap_or(0)}</div>
-                                            </div>
-                                        </div>
 
-                                        <button class="btn btn-sm btn-danger" style="margin-top: 8px;" on:click=move |_| auth.logout()>
-                                            {move || i18n.tr("nav_logout")}
-                                        </button>
-                                    </div>
-                                }.into_any()
+                                            <button class="btn btn-sm btn-danger" style="margin-top: 8px;" on:click=move |_| auth.logout()>
+                                                {move || i18n.tr("nav_logout")}
+                                            </button>
+                                        </div>
+                                    }.into_any()
+                                } else {
+                                    // Guest local records panel
+                                    let pbs = game.sp_pb_records.get();
+                                    view! {
+                                        <div style="display: flex; flex-direction: column; gap: 12px;">
+                                            <div style="font-size: 15px; font-weight: 700; color: var(--accent-gold);">
+                                                "📊 " {move || if i18n.is_zh() { "本地历史最佳纪录 (Personal Bests)" } else { "Local Personal Bests" }}
+                                            </div>
+                                            <div style="background: var(--bg-card-subtle); padding: 12px; border-radius: var(--radius-sm); border: 1px solid var(--border-color);">
+                                                <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px;">
+                                                    <div style="background: var(--bg-elevated); padding: 8px; border-radius: 4px;">
+                                                        <div style="font-size: 11px; color: var(--text-muted); font-weight: 600;">{move || i18n.tr("diff_easy")}</div>
+                                                        <div style="font-family: var(--font-mono); font-weight: 700; color: #34d399; font-size: 13px;">
+                                                            {pbs.easy.as_ref().map(|r| format!("{}s ({}m)", r.time_secs, r.moves)).unwrap_or_else(|| "--:--".into())}
+                                                        </div>
+                                                    </div>
+                                                    <div style="background: var(--bg-elevated); padding: 8px; border-radius: 4px;">
+                                                        <div style="font-size: 11px; color: var(--text-muted); font-weight: 600;">{move || i18n.tr("diff_medium")}</div>
+                                                        <div style="font-family: var(--font-mono); font-weight: 700; color: #34d399; font-size: 13px;">
+                                                            {pbs.medium.as_ref().map(|r| format!("{}s ({}m)", r.time_secs, r.moves)).unwrap_or_else(|| "--:--".into())}
+                                                        </div>
+                                                    </div>
+                                                    <div style="background: var(--bg-elevated); padding: 8px; border-radius: 4px;">
+                                                        <div style="font-size: 11px; color: var(--text-muted); font-weight: 600;">{move || i18n.tr("diff_expert")}</div>
+                                                        <div style="font-family: var(--font-mono); font-weight: 700; color: #34d399; font-size: 13px;">
+                                                            {pbs.expert.as_ref().map(|r| format!("{}s ({}m)", r.time_secs, r.moves)).unwrap_or_else(|| "--:--".into())}
+                                                        </div>
+                                                    </div>
+                                                    <div style="background: var(--bg-elevated); padding: 8px; border-radius: 4px;">
+                                                        <div style="font-size: 11px; color: var(--text-muted); font-weight: 600;">{move || i18n.tr("diff_custom")}</div>
+                                                        <div style="font-family: var(--font-mono); font-weight: 700; color: #34d399; font-size: 13px;">
+                                                            {pbs.custom.as_ref().map(|r| format!("{}s ({}m)", r.time_secs, r.moves)).unwrap_or_else(|| "--:--".into())}
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                            <div style="font-size: 11px; color: var(--text-secondary); text-align: center;">
+                                                {move || if i18n.is_zh() { "💡 登录或注册账号可将个人纪录同步至全球排行榜数据库。" } else { "💡 Log in or register to sync your personal bests to the cloud database." }}
+                                            </div>
+                                            <button
+                                                class="btn btn-primary"
+                                                on:click=move |_| {
+                                                    set_show_stats_first.set(false);
+                                                }
+                                            >
+                                                "🔑 " {move || if i18n.is_zh() { "前往登录 / 注册" } else { "Log In / Register" }}
+                                            </button>
+                                        </div>
+                                    }.into_any()
+                                }
                             } else {
                                 // Login / Register form
                                 view! {

@@ -112,6 +112,12 @@ enum Commands {
         #[arg(long)]
         seed: Option<u64>,
     },
+
+    /// View or clear local Personal Bests & high score records
+    Records {
+        #[arg(long)]
+        clear: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum, Serialize, Deserialize, PartialEq, Eq)]
@@ -557,6 +563,46 @@ fn main() {
                     "total_target_cells": config.total_cells() - config.mines,
                 })
             );
+        }
+        Commands::Records { clear } => {
+            if clear {
+                let empty_pb = shared::board::LocalPersonalBests::default();
+                empty_pb.save();
+                println!("🧹 Local Personal Best records cleared.");
+            } else {
+                let pb = shared::board::LocalPersonalBests::load_or_default();
+                println!("\n🏆 3D MÖBIUS MINESWEEPER // PERSONAL BEST RECORDS");
+                println!("==================================================");
+                let diffs = [
+                    (
+                        shared::board::Difficulty::Easy,
+                        "Beginner (9x9x3, 25 mines)",
+                    ),
+                    (
+                        shared::board::Difficulty::Medium,
+                        "Intermediate (16x16x4, 160 mines)",
+                    ),
+                    (
+                        shared::board::Difficulty::Expert,
+                        "Expert (30x16x6, 580 mines)",
+                    ),
+                    (shared::board::Difficulty::Custom, "Custom Configuration"),
+                ];
+                for (d, label) in diffs {
+                    if let Some(r) = pb.get_pb(d) {
+                        println!(
+                            "• {:<36} : ⚡ {:>3}s ({:>3} moves) [{}]",
+                            label, r.time_secs, r.moves, r.date
+                        );
+                    } else {
+                        println!("• {:<36} : - (No Record)", label);
+                    }
+                }
+                println!(
+                    "\nJSON Format:\n{}",
+                    serde_json::to_string_pretty(&pb).unwrap_or_default()
+                );
+            }
         }
     }
 }

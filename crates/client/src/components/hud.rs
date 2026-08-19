@@ -62,6 +62,12 @@ pub fn Hud(
                 return format!("{:02}:{:02}", m, sec);
             }
         }
+        if let Some(rec) = game.sp_pb_records.get().get_pb(diff) {
+            let s = rec.time_secs;
+            let m = s / 60;
+            let sec = s % 60;
+            return format!("{:02}:{:02}", m, sec);
+        }
         i18n.tr("hud_no_pb").to_string()
     };
 
@@ -168,24 +174,69 @@ pub fn Hud(
                 }}
             </div>
 
-            {move || {
-                if mode.get() == AppMode::SinglePlayer {
-                    let g = game_clone;
-                    view! {
-                        <button
-                            class="btn btn-sm btn-primary"
-                            on:click=move |_| {
-                                let cfg = g.sp_config.get();
-                                g.reset_sp_game(cfg);
+                <div class="hud-tool-group" style="display: flex; gap: 6px; align-items: center;">
+                    <button
+                        class=move || {
+                            if game_clone.is_flag_mode.get() {
+                                "btn btn-sm btn-danger active"
+                            } else {
+                                "btn btn-sm btn-secondary"
                             }
-                        >
-                            "🔄 " {move || i18n.tr("hud_restart")} " (R)"
-                        </button>
-                    }.into_any()
-                } else {
-                    view! { <div></div> }.into_any()
-                }
-            }}
+                        }
+                        title="Toggle Dig / Flag Mode (Shortcut: F)"
+                        on:click=move |_| {
+                            game_clone.set_is_flag_mode.update(|f| *f = !*f);
+                        }
+                    >
+                        {move || {
+                            if game_clone.is_flag_mode.get() {
+                                i18n.tr("tool_flag")
+                            } else {
+                                i18n.tr("tool_dig")
+                            }
+                        }}
+                    </button>
+
+                    {move || {
+                        if mode.get() == AppMode::SinglePlayer {
+                            let g = game_clone;
+                            view! {
+                                <button
+                                    class=move || {
+                                        if g.sp_is_paused.get() {
+                                            "btn btn-sm btn-accent active"
+                                        } else {
+                                            "btn btn-sm btn-secondary"
+                                        }
+                                    }
+                                    title="Pause / Resume Timer (Shortcut: P)"
+                                    on:click=move |_| {
+                                        g.sp_toggle_pause();
+                                    }
+                                >
+                                    {move || {
+                                        if g.sp_is_paused.get() {
+                                            format!("▶️ {} (P)", i18n.tr("hud_resume"))
+                                        } else {
+                                            format!("⏸️ {} (P)", i18n.tr("hud_pause"))
+                                        }
+                                    }}
+                                </button>
+                                <button
+                                    class="btn btn-sm btn-primary"
+                                    on:click=move |_| {
+                                        let cfg = g.sp_config.get();
+                                        g.reset_sp_game(cfg);
+                                    }
+                                >
+                                    "🔄 " {move || i18n.tr("hud_restart")} " (R)"
+                                </button>
+                            }.into_any()
+                        } else {
+                            view! { <div></div> }.into_any()
+                        }
+                    }}
+                </div>
         </div>
 
         {status_view}

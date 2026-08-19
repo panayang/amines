@@ -50,6 +50,10 @@ pub fn Navbar(
             </nav>
 
             <div class="nav-right">
+                <button class="btn btn-sm" on:click=move |_| on_open_stats.run(())>
+                    "🏆 " {move || if i18n.is_zh() { "纪录" } else { "Records" }}
+                </button>
+
                 <button class="btn btn-sm" on:click=move |_| i18n.toggle_language()>
                     "🌐 " {move || if i18n.lang.get() == shared::Language::En { "中文" } else { "English" }}
                 </button>

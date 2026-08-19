@@ -31,4 +31,8 @@ impl I18nContext {
         let current_lang = self.lang.get();
         t(current_lang, key)
     }
+
+    pub fn is_zh(&self) -> bool {
+        self.lang.get() == Language::Zh
+    }
 }

@@ -154,7 +154,7 @@ impl Room {
         }
 
         // Broadcast join system chat with event_key
-        let join_text = format_player_joined_msg(Language::Zh, username);
+        let join_text = format_player_joined_msg(Language::En, username);
         let _ = self
             .broadcast_tx
             .send(ServerMessage::ChatMessage(ChatMessagePayload {
@@ -393,7 +393,7 @@ impl Room {
                     all_mines,
                 });
 
-                let elim_text = format_eliminated_msg(Language::Zh, &player_name);
+                let elim_text = format_eliminated_msg(Language::En, &player_name);
                 let _ = self
                     .broadcast_tx
                     .send(ServerMessage::ChatMessage(ChatMessagePayload {
@@ -475,7 +475,7 @@ impl Room {
                     all_mines,
                 });
 
-                let elim_text = format_eliminated_msg(Language::Zh, &player_name);
+                let elim_text = format_eliminated_msg(Language::En, &player_name);
                 let _ = self
                     .broadcast_tx
                     .send(ServerMessage::ChatMessage(ChatMessagePayload {
@@ -554,6 +554,12 @@ impl Room {
 
         if all_revealed || all_eliminated {
             self.status = if all_revealed {
+                for c in self.board.cells.iter_mut() {
+                    if c.is_mine {
+                        c.is_flagged = true;
+                    }
+                }
+                self.board.flag_count = self.config.mines;
                 GameStatus::Won
             } else {
                 GameStatus::Lost
@@ -588,7 +594,7 @@ impl Room {
 
             if let Some(top) = sorted_players.first() {
                 let winner_name = &top.username;
-                let over_msg = format_game_over_msg(Language::Zh, winner_name, top.score);
+                let over_msg = format_game_over_msg(Language::En, winner_name, top.score);
                 let _ = self
                     .broadcast_tx
                     .send(ServerMessage::ChatMessage(ChatMessagePayload {

@@ -134,14 +134,18 @@ cargo clippy --workspace --all-targets
 - **`[WASD]` / `[Arrow Keys]`**: Move cursor across current 2D layer.
 - **`[PgUp]` / `[PgDn]`** or **`[` / `]`**: Ascend / descend 3D depth layers ($Z$).
 - **`[Space]` / `[Enter]`**: Reveal cell (or Chord if already opened and flags match).
-- **`[F]`**: Toggle flag 🚩 on unrevealed cell.
-- **`[C]`**: Chord adjacent safe cells.
+- **`[F]` / `[X]`**: Toggle flag 🚩 on unrevealed cell (Single-Player & Multiplayer).
+- **`[P]`**: Pause / resume timer with anti-cheat board masking in Single-Player.
+- **`[C]`**: Chord adjacent safe cells in-game, or Create Match Room in Multiplayer Lobby.
+- **`[Tab]` / `[L]`**: (Multiplayer) Toggle Ready status / Leave Room.
+- **`[T]`**: (Multiplayer) Broadcast quick tactical text message.
+- **`[+]` / `[-]` / `[K]`**: (Multiplayer) Adjust AI bot speed / Kick AI bot.
 - **`[1]` / `[2]` / `[3]` / `[4]`**: Select Easy, Medium, Expert, or Custom mode.
 - **`[R]`**: Restart game with first-click safety guarantee.
-- **`[B]`**: Trigger AI auto-move (Turing Master).
+- **`[B]`**: Trigger AI auto-move (SP) or add Turing Master bot to room (MP).
 - **`[/]`**: Calculate AI hint without modifying the board.
 - **`[M]`**: Cycle client mode (Single-Player ⇄ Multiplayer ⇄ Host Server).
-- **`[F1]` / `[?]` / `[K]`**: Toggle in-app command manual and controls modal.
+- **`[F1]` / `[?]`**: Toggle in-app command manual and controls modal.
 - **`[Q]` / `[Esc]`**: Quit application.
 
 ---

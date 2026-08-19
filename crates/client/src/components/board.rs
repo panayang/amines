@@ -34,6 +34,24 @@ pub fn BoardView(i18n: I18nContext, auth: AuthState, game: GameState) -> impl In
         }
     };
 
+    let g_key = game;
+    window_event_listener(leptos::ev::keydown, move |e: web_sys::KeyboardEvent| {
+        let key = e.key();
+        if key.eq_ignore_ascii_case("p") {
+            if g_key.mode.get() == AppMode::SinglePlayer {
+                g_key.sp_toggle_pause();
+            }
+        } else if key.eq_ignore_ascii_case("f") || key.eq_ignore_ascii_case("x") {
+            if let Some(coord) = g_key.hovered_coord.get() {
+                if g_key.mode.get() == AppMode::SinglePlayer {
+                    g_key.sp_toggle_flag(coord);
+                } else {
+                    g_key.mp_toggle_flag(coord);
+                }
+            }
+        }
+    });
+
     view! {
         <div class="board-viewport" on:wheel=on_wheel>
             <div class="board-wrapper">
@@ -47,20 +65,19 @@ pub fn BoardView(i18n: I18nContext, auth: AuthState, game: GameState) -> impl In
                     <span class="mobius-guide-label">"INVERT Y/Z"</span>
                 </div>
 
-                // Board Matrix with X & Y Coordinates
+                // Coordinates + Board Container
                 <div class="board-coord-container">
-                    // Top X-Axis Header
+                    // Top X-Coordinates Bar
                     <div
                         class="coords-x-bar"
                         style=move || {
                             let cfg = config();
                             format!(
-                                "grid-template-columns: 24px repeat({}, var(--cell-size));",
+                                "grid-template-columns: repeat({}, var(--cell-size));",
                                 cfg.width
                             )
                         }
                     >
-                        <div class="coord-corner">"X/Y"</div>
                         {move || {
                             let w = config().width;
                             (0..w).map(|x| view! {
@@ -69,9 +86,9 @@ pub fn BoardView(i18n: I18nContext, auth: AuthState, game: GameState) -> impl In
                         }}
                     </div>
 
-                    // Board Row: Y axis sidebar + 2D Slice Viewport (Layer Z)
-                    <div class="board-y-and-grid">
-                        // Left Y-Axis Sidebar
+                    // Y-Coordinates & Board Grid Row
+                    <div class="board-grid-row">
+                        // Left Y-Coordinates Sidebar
                         <div
                             class="coords-y-bar"
                             style=move || {
@@ -132,7 +149,11 @@ pub fn BoardView(i18n: I18nContext, auth: AuthState, game: GameState) -> impl In
                                                     return;
                                                 }
                                                 let c = b.get_cell(coord);
-                                                if c.is_revealed && c.adjacent_mines > 0 {
+                                                if g_left.is_flag_mode.get() {
+                                                    if !c.is_revealed {
+                                                        g_left.sp_toggle_flag(coord);
+                                                    }
+                                                } else if c.is_revealed && c.adjacent_mines > 0 {
                                                     g_left.sp_chord(coord, tok_left.clone());
                                                 } else if !c.is_revealed && !c.is_flagged {
                                                     g_left.sp_reveal(coord, tok_left.clone());
@@ -148,6 +169,9 @@ pub fn BoardView(i18n: I18nContext, auth: AuthState, game: GameState) -> impl In
                                                 }
                                                 g_right.sp_toggle_flag(coord);
                                             };
+
+                                            let g_hover = game;
+                                            let g_leave = game;
 
                                             let mut class_str = "cell".to_string();
                                             if is_revealed {
@@ -189,6 +213,8 @@ pub fn BoardView(i18n: I18nContext, auth: AuthState, game: GameState) -> impl In
                                                     data-val={data_val}
                                                     on:click=on_left_click
                                                     on:contextmenu=on_context_menu
+                                                    on:mouseenter=move |_| g_hover.set_hovered_coord.set(Some(coord))
+                                                    on:mouseleave=move |_| g_leave.set_hovered_coord.set(None)
                                                 >
                                                     <span>{cell_label}</span>
                                                 </div>
@@ -196,7 +222,6 @@ pub fn BoardView(i18n: I18nContext, auth: AuthState, game: GameState) -> impl In
                                         }
                                     }
                                 } else {
-                                    // Multiplayer Board View
                                     if let Some(room) = game.mp_room.get() {
                                         for y in 0..h {
                                             for x in 0..w {
@@ -217,7 +242,11 @@ pub fn BoardView(i18n: I18nContext, auth: AuthState, game: GameState) -> impl In
                                                     if let Some(r) = g_left.mp_room.get_untracked() {
                                                         let cell_idx = coord.to_index(r.config.width, r.config.height);
                                                         if let Some(c) = r.cells.get(cell_idx) {
-                                                            if c.is_revealed && c.adjacent_mines > 0 {
+                                                            if g_left.is_flag_mode.get() {
+                                                                if !c.is_revealed {
+                                                                    g_left.mp_toggle_flag(coord);
+                                                                }
+                                                            } else if c.is_revealed && c.adjacent_mines > 0 {
                                                                 g_left.mp_chord(coord);
                                                             } else if !c.is_revealed && !c.is_flagged {
                                                                 g_left.mp_reveal(coord);
@@ -231,6 +260,9 @@ pub fn BoardView(i18n: I18nContext, auth: AuthState, game: GameState) -> impl In
                                                     e.prevent_default();
                                                     g_right.mp_toggle_flag(coord);
                                                 };
+
+                                                let g_hover = game;
+                                                let g_leave = game;
 
                                                 let mut class_str = "cell".to_string();
                                                 if is_revealed {
@@ -272,6 +304,8 @@ pub fn BoardView(i18n: I18nContext, auth: AuthState, game: GameState) -> impl In
                                                         data-val={data_val}
                                                         on:click=on_left_click
                                                         on:contextmenu=on_context_menu
+                                                        on:mouseenter=move |_| g_hover.set_hovered_coord.set(Some(coord))
+                                                        on:mouseleave=move |_| g_leave.set_hovered_coord.set(None)
                                                     >
                                                         <span>{cell_label}</span>
                                                         {if let Some(color) = owner_color {
@@ -293,11 +327,30 @@ pub fn BoardView(i18n: I18nContext, auth: AuthState, game: GameState) -> impl In
 
                                 views
                             }}
-                        </div>
+                        // Anti-Cheat Pause Overlay
+                        {move || {
+                            if game.mode.get() == AppMode::SinglePlayer && game.sp_is_paused.get() {
+                                let g_res = game;
+                                view! {
+                                    <div class="board-paused-overlay" on:click=move |_| g_res.sp_toggle_pause()>
+                                        <div class="paused-card">
+                                            <div class="paused-icon">"⏸️"</div>
+                                            <div class="paused-title">{move || i18n.tr("status_paused")}</div>
+                                            <button class="btn btn-primary" on:click=move |_| g_res.sp_toggle_pause()>
+                                                "▶️ " {move || i18n.tr("hud_resume")} " (P)"
+                                            </button>
+                                        </div>
+                                    </div>
+                                }.into_any()
+                            } else {
+                                view! { <div></div> }.into_any()
+                            }
+                        }}
                     </div>
                 </div>
+            </div>
 
-                // Right Möbius Twist Seam Indicator
+            // Right Möbius Twist Seam Indicator
                 <div
                     class="mobius-guide right"
                     title=move || i18n.tr("guide_mobius_right")
@@ -306,6 +359,25 @@ pub fn BoardView(i18n: I18nContext, auth: AuthState, game: GameState) -> impl In
                     <span style="font-size: 14px;">"⟲"</span>
                     <span class="mobius-guide-label">"INVERT Y/Z"</span>
                 </div>
+            </div>
+
+            // Mobile Touch Friendly Layer Navigation Bar
+            <div class="mobile-layer-bar">
+                <button
+                    class="btn btn-sm btn-secondary"
+                    on:click=move |_| game.step_layer(-1)
+                >
+                    {move || i18n.tr("mobile_prev_layer")}
+                </button>
+                <span class="mobile-layer-indicator">
+                    "Z: " {move || current_layer()} " / " {move || config().depth - 1}
+                </span>
+                <button
+                    class="btn btn-sm btn-secondary"
+                    on:click=move |_| game.step_layer(1)
+                >
+                    {move || i18n.tr("mobile_next_layer")}
+                </button>
             </div>
         </div>
     }
