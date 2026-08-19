@@ -47,3 +47,7 @@ benchmark_deepseek-v4-flash_cloud_easy_20260819_151806.csv
 benchmark_glm-5.2_cloud_easy_20260819_151857.csv
 benchmark_kimi-k3_cloud_easy_20260819_151937.csv
 scripts/__pycache__/evaluate_llm.cpython-314.pyc
+test_bot.json
+test_debug.json
+test_trace.json
+test_eval.json

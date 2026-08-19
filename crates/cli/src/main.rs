@@ -536,7 +536,7 @@ fn main() {
                 board.reveal(center, None, None);
 
                 let mut moves = 0;
-                while board.status == GameStatus::Playing && moves < 2000 {
+                while board.status == GameStatus::Playing && moves < 6000 {
                     moves += 1;
                     let snapshots: Vec<CellSnapshot> =
                         board.cells.iter().map(CellSnapshot::from).collect();

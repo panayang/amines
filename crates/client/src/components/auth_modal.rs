@@ -76,12 +76,31 @@ pub fn AuthModal(
         }
     };
 
-    let format_pb = |ms_opt: Option<u64>| match ms_opt {
-        Some(ms) => {
-            let s = ms / 1000;
-            format!("{:02}:{:02}", s / 60, s % 60)
+    let get_display_pb = move |diff: shared::board::Difficulty| -> String {
+        let pbs = game.sp_pb_records.get();
+        let local_pb = pbs.get_pb(diff).cloned();
+        let cloud_pb_ms = auth.stats.get().as_ref().and_then(|s| match diff {
+            shared::board::Difficulty::Easy => s.easy_pb_ms,
+            shared::board::Difficulty::Medium => s.medium_pb_ms,
+            shared::board::Difficulty::Expert => s.expert_pb_ms,
+            shared::board::Difficulty::Custom => None,
+        });
+
+        match (local_pb, cloud_pb_ms) {
+            (Some(loc), Some(cloud_ms)) => {
+                let cloud_s = cloud_ms / 1000;
+                let best_s = loc.time_secs.min(cloud_s);
+                format!("{}s ({}m)", best_s, loc.moves)
+            }
+            (Some(loc), None) => {
+                format!("{}s ({}m)", loc.time_secs, loc.moves)
+            }
+            (None, Some(cloud_ms)) => {
+                let s = cloud_ms / 1000;
+                format!("{}s", s)
+            }
+            (None, None) => "--:--".to_string(),
         }
-        None => "--:--".to_string(),
     };
 
     view! {
@@ -91,7 +110,7 @@ pub fn AuthModal(
             }
 
             let is_logged = auth.is_logged_in();
-            let show_stats = show_stats_first.get() || is_logged;
+            let show_stats = show_stats_first.get();
 
             view! {
                 <div class="modal-backdrop" on:click=move |_| set_open.set(false)>
@@ -100,7 +119,7 @@ pub fn AuthModal(
                             <span>
                                 {move || {
                                     if show_stats {
-                                        i18n.tr("nav_stats")
+                                        if i18n.is_zh() { "🏆 个人纪录与统计" } else { "🏆 Records & Statistics" }
                                     } else if is_register_tab.get() {
                                         i18n.tr("auth_register_title")
                                     } else {
@@ -113,105 +132,99 @@ pub fn AuthModal(
 
                         <div class="modal-body">
                             {if show_stats {
-                                if is_logged {
-                                    // User cloud stats panel
-                                    let stats = auth.stats.get();
-                                    view! {
-                                        <div style="display: flex; flex-direction: column; gap: 10px;">
-                                            <div style="font-size: 16px; font-weight: 700; color: var(--primary);">
-                                                "👤 " {auth.username.get().unwrap_or_default()}
-                                            </div>
-
-                                            <div style="background: var(--bg-card-subtle); padding: 12px; border-radius: var(--radius-sm); border: 1px solid var(--border-color);">
-                                                <div style="font-weight: 700; font-size: 13px; margin-bottom: 8px; color: var(--accent-gold);">
-                                                    "🏆 " {move || i18n.tr("hud_pb")}
-                                                </div>
-                                                <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; text-align: center;">
-                                                    <div style="background: var(--bg-elevated); padding: 6px; border-radius: 4px;">
-                                                        <div style="font-size: 11px; color: var(--text-muted);">{move || i18n.tr("diff_easy")}</div>
-                                                        <div style="font-family: var(--font-mono); font-weight: 700; color: var(--primary);">{format_pb(stats.as_ref().and_then(|s| s.easy_pb_ms))}</div>
-                                                    </div>
-                                                    <div style="background: var(--bg-elevated); padding: 6px; border-radius: 4px;">
-                                                        <div style="font-size: 11px; color: var(--text-muted);">{move || i18n.tr("diff_medium")}</div>
-                                                        <div style="font-family: var(--font-mono); font-weight: 700; color: var(--primary);">{format_pb(stats.as_ref().and_then(|s| s.medium_pb_ms))}</div>
-                                                    </div>
-                                                    <div style="background: var(--bg-elevated); padding: 6px; border-radius: 4px;">
-                                                        <div style="font-size: 11px; color: var(--text-muted);">{move || i18n.tr("diff_expert")}</div>
-                                                        <div style="font-family: var(--font-mono); font-weight: 700; color: var(--primary);">{format_pb(stats.as_ref().and_then(|s| s.expert_pb_ms))}</div>
-                                                    </div>
-                                                </div>
-                                            </div>
-
-                                            <div style="background: var(--bg-card-subtle); padding: 12px; border-radius: var(--radius-sm); border: 1px solid var(--border-color); display: flex; justify-content: space-around; text-align: center;">
-                                                <div>
-                                                    <div style="font-size: 11px; color: var(--text-muted);">"SP Games"</div>
-                                                    <div style="font-family: var(--font-mono); font-weight: 700;">{stats.as_ref().map(|s| s.sp_games_played).unwrap_or(0)}</div>
-                                                </div>
-                                                <div>
-                                                    <div style="font-size: 11px; color: var(--text-muted);">"MP Wins"</div>
-                                                    <div style="font-family: var(--font-mono); font-weight: 700; color: var(--success);">{stats.as_ref().map(|s| s.mp_games_won).unwrap_or(0)}</div>
-                                                </div>
-                                                <div>
-                                                    <div style="font-size: 11px; color: var(--text-muted);">"MP Total Score"</div>
-                                                    <div style="font-family: var(--font-mono); font-weight: 700; color: var(--primary);">{stats.as_ref().map(|s| s.mp_total_score).unwrap_or(0)}</div>
-                                                </div>
-                                            </div>
-
-                                            <button class="btn btn-sm btn-danger" style="margin-top: 8px;" on:click=move |_| auth.logout()>
-                                                {move || i18n.tr("nav_logout")}
-                                            </button>
-                                        </div>
-                                    }.into_any()
-                                } else {
-                                    // Guest local records panel
-                                    let pbs = game.sp_pb_records.get();
-                                    view! {
-                                        <div style="display: flex; flex-direction: column; gap: 12px;">
+                                let stats = auth.stats.get();
+                                view! {
+                                    <div style="display: flex; flex-direction: column; gap: 12px;">
+                                        // User Identity Header
+                                        <div style="display: flex; justify-content: space-between; align-items: center;">
                                             <div style="font-size: 15px; font-weight: 700; color: var(--accent-gold);">
-                                                "📊 " {move || if i18n.is_zh() { "本地历史最佳纪录 (Personal Bests)" } else { "Local Personal Bests" }}
+                                                {if is_logged {
+                                                    view! { <span>"👤 " {auth.username.get().unwrap_or_default()}</span> }.into_any()
+                                                } else {
+                                                    view! { <span>"💾 " {move || if i18n.is_zh() { "访客模式 (本地存储)" } else { "Guest (Local Storage)" }}</span> }.into_any()
+                                                }}
                                             </div>
-                                            <div style="background: var(--bg-card-subtle); padding: 12px; border-radius: var(--radius-sm); border: 1px solid var(--border-color);">
-                                                <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px;">
-                                                    <div style="background: var(--bg-elevated); padding: 8px; border-radius: 4px;">
-                                                        <div style="font-size: 11px; color: var(--text-muted); font-weight: 600;">{move || i18n.tr("diff_easy")}</div>
-                                                        <div style="font-family: var(--font-mono); font-weight: 700; color: #34d399; font-size: 13px;">
-                                                            {pbs.easy.as_ref().map(|r| format!("{}s ({}m)", r.time_secs, r.moves)).unwrap_or_else(|| "--:--".into())}
-                                                        </div>
+                                            <div>
+                                                {if is_logged {
+                                                    view! { <span style="font-size: 11px; background: rgba(52, 211, 153, 0.15); color: #34d399; padding: 2px 8px; border-radius: 999px; font-weight: 600;">"☁️ Cloud"</span> }.into_any()
+                                                } else {
+                                                    view! { <span style="font-size: 11px; background: rgba(251, 191, 36, 0.15); color: #fbbf24; padding: 2px 8px; border-radius: 999px; font-weight: 600;">"💾 Local"</span> }.into_any()
+                                                }}
+                                            </div>
+                                        </div>
+
+                                        // All 4-Difficulty Personal Bests Grid
+                                        <div style="background: var(--bg-card-subtle); padding: 12px; border-radius: var(--radius-sm); border: 1px solid var(--border-color);">
+                                            <div style="font-weight: 700; font-size: 12px; margin-bottom: 8px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px;">
+                                                "🏆 " {move || if i18n.is_zh() { "全难度最佳成绩 (Personal Bests)" } else { "Personal Bests (All Difficulties)" }}
+                                            </div>
+                                            <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px;">
+                                                <div style="background: var(--bg-elevated); padding: 8px; border-radius: 4px;">
+                                                    <div style="font-size: 11px; color: var(--text-muted); font-weight: 600;">{move || i18n.tr("diff_easy")} " (9x9x3)"</div>
+                                                    <div style="font-family: var(--font-mono); font-weight: 700; color: #34d399; font-size: 14px; margin-top: 2px;">
+                                                        {get_display_pb(shared::board::Difficulty::Easy)}
                                                     </div>
-                                                    <div style="background: var(--bg-elevated); padding: 8px; border-radius: 4px;">
-                                                        <div style="font-size: 11px; color: var(--text-muted); font-weight: 600;">{move || i18n.tr("diff_medium")}</div>
-                                                        <div style="font-family: var(--font-mono); font-weight: 700; color: #34d399; font-size: 13px;">
-                                                            {pbs.medium.as_ref().map(|r| format!("{}s ({}m)", r.time_secs, r.moves)).unwrap_or_else(|| "--:--".into())}
-                                                        </div>
+                                                </div>
+                                                <div style="background: var(--bg-elevated); padding: 8px; border-radius: 4px;">
+                                                    <div style="font-size: 11px; color: var(--text-muted); font-weight: 600;">{move || i18n.tr("diff_medium")} " (16x16x4)"</div>
+                                                    <div style="font-family: var(--font-mono); font-weight: 700; color: #34d399; font-size: 14px; margin-top: 2px;">
+                                                        {get_display_pb(shared::board::Difficulty::Medium)}
                                                     </div>
-                                                    <div style="background: var(--bg-elevated); padding: 8px; border-radius: 4px;">
-                                                        <div style="font-size: 11px; color: var(--text-muted); font-weight: 600;">{move || i18n.tr("diff_expert")}</div>
-                                                        <div style="font-family: var(--font-mono); font-weight: 700; color: #34d399; font-size: 13px;">
-                                                            {pbs.expert.as_ref().map(|r| format!("{}s ({}m)", r.time_secs, r.moves)).unwrap_or_else(|| "--:--".into())}
-                                                        </div>
+                                                </div>
+                                                <div style="background: var(--bg-elevated); padding: 8px; border-radius: 4px;">
+                                                    <div style="font-size: 11px; color: var(--text-muted); font-weight: 600;">{move || i18n.tr("diff_expert")} " (30x16x6)"</div>
+                                                    <div style="font-family: var(--font-mono); font-weight: 700; color: #34d399; font-size: 14px; margin-top: 2px;">
+                                                        {get_display_pb(shared::board::Difficulty::Expert)}
                                                     </div>
-                                                    <div style="background: var(--bg-elevated); padding: 8px; border-radius: 4px;">
-                                                        <div style="font-size: 11px; color: var(--text-muted); font-weight: 600;">{move || i18n.tr("diff_custom")}</div>
-                                                        <div style="font-family: var(--font-mono); font-weight: 700; color: #34d399; font-size: 13px;">
-                                                            {pbs.custom.as_ref().map(|r| format!("{}s ({}m)", r.time_secs, r.moves)).unwrap_or_else(|| "--:--".into())}
-                                                        </div>
+                                                </div>
+                                                <div style="background: var(--bg-elevated); padding: 8px; border-radius: 4px;">
+                                                    <div style="font-size: 11px; color: var(--text-muted); font-weight: 600;">{move || i18n.tr("diff_custom")}</div>
+                                                    <div style="font-family: var(--font-mono); font-weight: 700; color: #34d399; font-size: 14px; margin-top: 2px;">
+                                                        {get_display_pb(shared::board::Difficulty::Custom)}
                                                     </div>
                                                 </div>
                                             </div>
-                                            <div style="font-size: 11px; color: var(--text-secondary); text-align: center;">
-                                                {move || if i18n.is_zh() { "💡 登录或注册账号可将个人纪录同步至全球排行榜数据库。" } else { "💡 Log in or register to sync your personal bests to the cloud database." }}
-                                            </div>
-                                            <button
-                                                class="btn btn-primary"
-                                                on:click=move |_| {
-                                                    set_show_stats_first.set(false);
-                                                }
-                                            >
-                                                "🔑 " {move || if i18n.is_zh() { "前往登录 / 注册" } else { "Log In / Register" }}
-                                            </button>
                                         </div>
-                                    }.into_any()
-                                }
+
+                                        // Cloud Stats if logged in
+                                        {if is_logged {
+                                            view! {
+                                                <div style="background: var(--bg-card-subtle); padding: 10px 12px; border-radius: var(--radius-sm); border: 1px solid var(--border-color); display: flex; justify-content: space-around; text-align: center;">
+                                                    <div>
+                                                        <div style="font-size: 11px; color: var(--text-muted);">"SP Games"</div>
+                                                        <div style="font-family: var(--font-mono); font-weight: 700; font-size: 13px;">{stats.as_ref().map(|s| s.sp_games_played).unwrap_or(0)}</div>
+                                                    </div>
+                                                    <div>
+                                                        <div style="font-size: 11px; color: var(--text-muted);">"MP Wins"</div>
+                                                        <div style="font-family: var(--font-mono); font-weight: 700; color: var(--success); font-size: 13px;">{stats.as_ref().map(|s| s.mp_games_won).unwrap_or(0)}</div>
+                                                    </div>
+                                                    <div>
+                                                        <div style="font-size: 11px; color: var(--text-muted);">"MP Score"</div>
+                                                        <div style="font-family: var(--font-mono); font-weight: 700; color: var(--primary); font-size: 13px;">{stats.as_ref().map(|s| s.mp_total_score).unwrap_or(0)}</div>
+                                                    </div>
+                                                </div>
+
+                                                <button class="btn btn-sm btn-danger" style="margin-top: 4px;" on:click=move |_| auth.logout()>
+                                                    {move || i18n.tr("nav_logout")}
+                                                </button>
+                                            }.into_any()
+                                        } else {
+                                            view! {
+                                                <div style="font-size: 11px; color: var(--text-secondary); text-align: center;">
+                                                    {move || if i18n.is_zh() { "💡 登录或注册账号可将个人纪录同步至全球排行榜数据库。" } else { "💡 Log in or register to sync your personal bests to the cloud database." }}
+                                                </div>
+                                                <button
+                                                    class="btn btn-primary"
+                                                    on:click=move |_| {
+                                                        set_show_stats_first.set(false);
+                                                    }
+                                                >
+                                                    "🔑 " {move || if i18n.is_zh() { "前往登录 / 注册" } else { "Log In / Register" }}
+                                                </button>
+                                            }.into_any()
+                                        }}
+                                    </div>
+                                }.into_any()
                             } else {
                                 // Login / Register form
                                 view! {
@@ -274,6 +287,16 @@ pub fn AuthModal(
                                                 i18n.tr("auth_switch_to_reg")
                                             }}
                                         </div>
+
+                                        <button
+                                            class="btn btn-sm btn-subtle"
+                                            style="margin-top: 6px;"
+                                            on:click=move |_| {
+                                                set_show_stats_first.set(true);
+                                            }
+                                        >
+                                            "🏆 " {move || if i18n.is_zh() { "返回查看个人纪录" } else { "View Personal Bests" }}
+                                        </button>
                                     </div>
                                 }.into_any()
                             }}

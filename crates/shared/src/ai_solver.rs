@@ -3,14 +3,14 @@ use crate::topology::{Coord3D, Dimensions};
 use rand::seq::SliceRandom;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BotTier {
     Novice,       // Tier 1: Single-cell trivial deduction + 3% noise
-    Intermediate, // Tier 2: Subset & overlap interval bounds
-    Advanced,     // Tier 3: Full RREF Gaussian Elimination with bound satisfaction
-    Master,       // Tier 4: Exact Bayesian counting + information entropy
+    Intermediate, // Tier 2: Multi-pass subset reduction + overlap interval inference
+    Advanced,     // Tier 3: Subset reduction + Component Integer Gaussian bound reduction
+    Master, // Tier 4: Exact Component Bayesian Model Counting + Unlinked Density + Information Entropy
 }
 
 impl BotTier {
@@ -49,9 +49,9 @@ pub enum AiAction {
     Chord(Coord3D),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct Equation {
-    cells: Vec<Coord3D>,
+    cells: HashSet<Coord3D>,
     mines: usize,
 }
 
@@ -91,7 +91,7 @@ impl AiSolver {
             return Some(AiAction::Reveal(center));
         }
 
-        // Check for immediate Chord opportunities on satisfied revealed cells
+        // 2. Check for immediate Chord opportunities on satisfied revealed cells
         for (&coord, &adj_mines) in &revealed_map {
             if adj_mines == 0 {
                 continue;
@@ -113,18 +113,18 @@ impl AiSolver {
             }
         }
 
-        // Build base equations from revealed cells
+        // 3. Build base equations strictly from frontier cells
         let mut equations: Vec<Equation> = Vec::new();
         for (&coord, &adj_mines) in &revealed_map {
             let neighbors = coord.neighbors_26(dims);
-            let mut unrev_neighbors = Vec::new();
+            let mut unrev_neighbors = HashSet::new();
             let mut flag_count = 0;
 
             for n in neighbors {
                 if flagged_set.contains(&n) {
                     flag_count += 1;
                 } else if unrevealed_set.contains(&n) {
-                    unrev_neighbors.push(n);
+                    unrev_neighbors.insert(n);
                 }
             }
 
@@ -137,21 +137,11 @@ impl AiSolver {
             }
         }
 
-        // --- Tier 1: Single-cell trivial deduction ---
-        let mut certain_safe: HashSet<Coord3D> = HashSet::new();
-        let mut certain_mines: HashSet<Coord3D> = HashSet::new();
+        // Deduplicate
+        equations = Self::dedup_equations(equations);
 
-        for eq in &equations {
-            if eq.mines == 0 {
-                for &c in &eq.cells {
-                    certain_safe.insert(c);
-                }
-            } else if eq.mines == eq.cells.len() {
-                for &c in &eq.cells {
-                    certain_mines.insert(c);
-                }
-            }
-        }
+        // --- Tier 1: Single-cell direct deduction ---
+        let (mut certain_safe, mut certain_mines) = Self::direct_deductions(&equations);
 
         // Novice minor noise (3% chance of minor hesitation)
         if tier == BotTier::Novice && rng.gen_bool(0.03) {
@@ -170,7 +160,6 @@ impl AiSolver {
         }
 
         if tier == BotTier::Novice {
-            // Pick lowest estimated risk on boundary
             let best_boundary = Self::pick_lowest_risk_boundary(&equations, &unrevealed_set);
             return best_boundary.or_else(|| {
                 let list: Vec<Coord3D> = unrevealed_set.iter().copied().collect();
@@ -178,95 +167,109 @@ impl AiSolver {
             });
         }
 
-        // --- Tier 2: Subset & Overlap Interval Deduction ---
-        let mut derived_safe: HashSet<Coord3D> = HashSet::new();
-        let mut derived_mines: HashSet<Coord3D> = HashSet::new();
-
-        for (i, eq_a) in equations.iter().enumerate() {
-            let set_a: HashSet<Coord3D> = eq_a.cells.iter().copied().collect();
-
-            for (j, eq_b) in equations.iter().enumerate() {
-                if i == j {
-                    continue;
-                }
-                let set_b: HashSet<Coord3D> = eq_b.cells.iter().copied().collect();
-
-                let inter: HashSet<Coord3D> = set_a.intersection(&set_b).copied().collect();
-                if inter.is_empty() {
-                    continue;
-                }
-
-                let diff_a: HashSet<Coord3D> = set_a.difference(&set_b).copied().collect();
-                let diff_b: HashSet<Coord3D> = set_b.difference(&set_a).copied().collect();
-
-                // Max and min mines in intersection from eq_a:
-                let min_in_inter = eq_a.mines.saturating_sub(diff_a.len());
-                let max_in_inter = eq_a.mines.min(inter.len());
-
-                // Mines in diff_b = eq_b.mines - mines(inter)
-                // min_in_diff_b = eq_b.mines - max_in_inter
-                // max_in_diff_b = eq_b.mines - min_in_inter
-                if eq_b.mines >= max_in_inter {
-                    let min_in_diff_b = eq_b.mines - max_in_inter;
-                    if !diff_b.is_empty() && min_in_diff_b == diff_b.len() {
-                        for &c in &diff_b {
-                            derived_mines.insert(c);
-                        }
-                    }
-                }
-
-                if eq_b.mines >= min_in_inter {
-                    let max_in_diff_b = eq_b.mines - min_in_inter;
-                    if !diff_b.is_empty() && max_in_diff_b == 0 {
-                        for &c in &diff_b {
-                            derived_safe.insert(c);
-                        }
-                    }
-                }
-            }
+        // --- Tier 2+: Multi-Pass Subset Replacement Engine ---
+        let (iter_safe, iter_mines, reduced_eqs) = Self::solve_subset_replacement(equations);
+        for c in iter_safe {
+            certain_safe.insert(c);
+        }
+        for c in iter_mines {
+            certain_mines.insert(c);
         }
 
-        if let Some(best_safe) = Self::pick_best_safe_cell(&derived_safe, dims, &unrevealed_set) {
+        if let Some(best_safe) = Self::pick_best_safe_cell(&certain_safe, dims, &unrevealed_set) {
             return Some(AiAction::Reveal(best_safe));
         }
-        if let Some(&mine_c) = derived_mines.iter().find(|c| !flagged_set.contains(c)) {
+        if let Some(&mine_c) = certain_mines.iter().find(|c| !flagged_set.contains(c)) {
             return Some(AiAction::Flag(mine_c));
         }
 
         if tier == BotTier::Intermediate {
-            let best_boundary = Self::pick_lowest_risk_boundary(&equations, &unrevealed_set);
+            let best_boundary = Self::pick_lowest_risk_boundary(&reduced_eqs, &unrevealed_set);
             return best_boundary.or_else(|| {
                 let list: Vec<Coord3D> = unrevealed_set.iter().copied().collect();
                 list.choose(&mut rng).copied().map(AiAction::Reveal)
             });
         }
 
-        // --- Tier 3 & 4: Gaussian Elimination (RREF with Bound Analysis) ---
-        let (gauss_safe, gauss_mines, cell_probs) =
-            Self::solve_gaussian_rref(&equations, total_mines.saturating_sub(flagged_set.len()));
+        // --- Tier 3 & 4: Connected Component Decomposition + Exact Model Counting (Tank Solver) ---
+        let remaining_mines_count = total_mines.saturating_sub(flagged_set.len());
+        let (comp_safe, comp_mines, cell_probs) = Self::solve_connected_components(
+            &reduced_eqs,
+            &unrevealed_set,
+            remaining_mines_count,
+            tier == BotTier::Master,
+        );
 
-        if let Some(best_safe) = Self::pick_best_safe_cell(&gauss_safe, dims, &unrevealed_set) {
+        for c in comp_safe {
+            certain_safe.insert(c);
+        }
+        for c in comp_mines {
+            certain_mines.insert(c);
+        }
+
+        if let Some(best_safe) = Self::pick_best_safe_cell(&certain_safe, dims, &unrevealed_set) {
             return Some(AiAction::Reveal(best_safe));
         }
-        if let Some(&mine_c) = gauss_mines.iter().find(|c| !flagged_set.contains(c)) {
+        if let Some(&mine_c) = certain_mines.iter().find(|c| !flagged_set.contains(c)) {
             return Some(AiAction::Flag(mine_c));
         }
 
-        // Probabilistic Guessing
+        // --- Probabilistic Guessing with Unlinked Interior Density Check ---
+        let mut frontier_vars = HashSet::new();
+        for eq in &reduced_eqs {
+            for &c in &eq.cells {
+                frontier_vars.insert(c);
+            }
+        }
+
+        let unlinked_cells: Vec<Coord3D> = unrevealed_set
+            .iter()
+            .copied()
+            .filter(|c| !frontier_vars.contains(c))
+            .collect();
+
+        // Estimate background probability of unlinked cells
+        let est_frontier_mines: f64 = cell_probs.values().sum();
+        let unlinked_mines = (remaining_mines_count as f64 - est_frontier_mines).max(0.0);
+        let unlinked_prob = if !unlinked_cells.is_empty() {
+            (unlinked_mines / unlinked_cells.len() as f64).clamp(0.001, 0.999)
+        } else {
+            1.0
+        };
+
         if !cell_probs.is_empty() {
             let mut sorted_probs: Vec<(Coord3D, f64)> = cell_probs.into_iter().collect();
             sorted_probs.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
 
+            let (best_frontier_cell, min_frontier_p) = sorted_probs[0];
+
+            // If background unlinked cells have lower or equal risk than frontier bottleneck,
+            // make a smart exploratory click in the open interior!
+            if (tier == BotTier::Master || tier == BotTier::Advanced)
+                && !unlinked_cells.is_empty()
+                && unlinked_prob <= min_frontier_p
+            {
+                // Choose unlinked cell with maximum unrevealed 26-neighbors
+                let pick = unlinked_cells
+                    .iter()
+                    .max_by_key(|c| {
+                        c.neighbors_26(dims)
+                            .iter()
+                            .filter(|n| unrevealed_set.contains(n))
+                            .count()
+                    })
+                    .copied()
+                    .unwrap_or(unlinked_cells[0]);
+                return Some(AiAction::Reveal(pick));
+            }
+
             if tier == BotTier::Advanced {
-                if let Some(&(best_c, _)) = sorted_probs.first() {
-                    return Some(AiAction::Reveal(best_c));
-                }
+                return Some(AiAction::Reveal(best_frontier_cell));
             } else {
-                // Tier 4: Master - Minimum risk + Maximum Shannon Entropy on 3D neighborhood
-                let min_p = sorted_probs[0].1;
+                // Tier 4: Master - Maximum Shannon Information Gain among lowest-risk candidates
                 let top_candidates: Vec<Coord3D> = sorted_probs
                     .iter()
-                    .take_while(|(_, p)| (*p - min_p).abs() < 1e-4)
+                    .take_while(|(_, p)| (*p - min_frontier_p).abs() < 1e-4)
                     .map(|(c, _)| *c)
                     .collect();
 
@@ -290,12 +293,527 @@ impl AiSolver {
             }
         }
 
-        // Fallback: Pick lowest risk boundary cell
-        let best_boundary = Self::pick_lowest_risk_boundary(&equations, &unrevealed_set);
-        best_boundary.or_else(|| {
-            let list: Vec<Coord3D> = unrevealed_set.iter().copied().collect();
-            list.choose(&mut rng).copied().map(AiAction::Reveal)
-        })
+        // Final fallback: Pick unlinked cell if available, else random unrevealed
+        if !unlinked_cells.is_empty() {
+            let pick = unlinked_cells.choose(&mut rng).copied().unwrap();
+            return Some(AiAction::Reveal(pick));
+        }
+
+        let list: Vec<Coord3D> = unrevealed_set.iter().copied().collect();
+        list.choose(&mut rng).copied().map(AiAction::Reveal)
+    }
+
+    fn dedup_equations(eqs: Vec<Equation>) -> Vec<Equation> {
+        let mut out: Vec<Equation> = Vec::new();
+        for eq in eqs {
+            if eq.cells.is_empty() {
+                continue;
+            }
+            if !out
+                .iter()
+                .any(|e| e.mines == eq.mines && e.cells == eq.cells)
+            {
+                out.push(eq);
+            }
+        }
+        out
+    }
+
+    fn direct_deductions(equations: &[Equation]) -> (HashSet<Coord3D>, HashSet<Coord3D>) {
+        let mut safe = HashSet::new();
+        let mut mines = HashSet::new();
+
+        for eq in equations {
+            if eq.mines == 0 {
+                for &c in &eq.cells {
+                    safe.insert(c);
+                }
+            } else if eq.mines == eq.cells.len() {
+                for &c in &eq.cells {
+                    mines.insert(c);
+                }
+            }
+        }
+
+        (safe, mines)
+    }
+
+    /// Fast Multi-pass subset reduction and replacement
+    fn solve_subset_replacement(
+        mut eqs: Vec<Equation>,
+    ) -> (HashSet<Coord3D>, HashSet<Coord3D>, Vec<Equation>) {
+        let mut certain_safe = HashSet::new();
+        let mut certain_mines = HashSet::new();
+
+        for _pass in 0..6 {
+            let mut changed = false;
+
+            // 1. Direct reductions
+            for eq in &eqs {
+                if eq.mines == 0 {
+                    for &c in &eq.cells {
+                        if certain_safe.insert(c) {
+                            changed = true;
+                        }
+                    }
+                } else if eq.mines == eq.cells.len() {
+                    for &c in &eq.cells {
+                        if certain_mines.insert(c) {
+                            changed = true;
+                        }
+                    }
+                }
+            }
+
+            // 2. Simplify existing equations using known safe / mines
+            let mut simplified: Vec<Equation> = Vec::new();
+            for eq in &eqs {
+                let mut new_cells = HashSet::new();
+                let mut new_mines = eq.mines;
+
+                for &c in &eq.cells {
+                    if certain_mines.contains(&c) {
+                        new_mines = new_mines.saturating_sub(1);
+                    } else if !certain_safe.contains(&c) {
+                        new_cells.insert(c);
+                    }
+                }
+
+                if !new_cells.is_empty() {
+                    if !simplified
+                        .iter()
+                        .any(|e| e.mines == new_mines && e.cells == new_cells)
+                    {
+                        simplified.push(Equation {
+                            cells: new_cells,
+                            mines: new_mines,
+                        });
+                    }
+                }
+            }
+            eqs = simplified;
+
+            // 3. Subset reduction: If A subset of B => Replace B with B \ A
+            let n = eqs.len();
+            let mut new_equations = Vec::new();
+
+            for i in 0..n {
+                let set_a = &eqs[i].cells;
+                let mines_a = eqs[i].mines;
+
+                for j in 0..n {
+                    if i == j {
+                        continue;
+                    }
+                    let set_b = &eqs[j].cells;
+                    let mines_b = eqs[j].mines;
+
+                    if set_a.is_subset(set_b) && mines_b >= mines_a {
+                        let diff: HashSet<Coord3D> = set_b.difference(set_a).copied().collect();
+                        let diff_mines = mines_b - mines_a;
+
+                        if !diff.is_empty() {
+                            if diff_mines == 0 {
+                                for &c in &diff {
+                                    if certain_safe.insert(c) {
+                                        changed = true;
+                                    }
+                                }
+                            } else if diff_mines == diff.len() {
+                                for &c in &diff {
+                                    if certain_mines.insert(c) {
+                                        changed = true;
+                                    }
+                                }
+                            } else {
+                                new_equations.push(Equation {
+                                    cells: diff,
+                                    mines: diff_mines,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+
+            for eq in new_equations {
+                if !eqs
+                    .iter()
+                    .any(|e| e.mines == eq.mines && e.cells == eq.cells)
+                {
+                    eqs.push(eq);
+                    changed = true;
+                }
+            }
+
+            if !changed {
+                break;
+            }
+        }
+
+        (certain_safe, certain_mines, eqs)
+    }
+
+    /// Decompose frontier into independent connected components and solve exactly via Backtracking Model Counting
+    fn solve_connected_components(
+        equations: &[Equation],
+        _unrevealed: &HashSet<Coord3D>,
+        _remaining_mines: usize,
+        is_master: bool,
+    ) -> (HashSet<Coord3D>, HashSet<Coord3D>, HashMap<Coord3D, f64>) {
+        let mut certain_safe = HashSet::new();
+        let mut certain_mines = HashSet::new();
+        let mut cell_probs = HashMap::new();
+
+        if equations.is_empty() {
+            return (certain_safe, certain_mines, cell_probs);
+        }
+
+        // Build variable adjacency graph
+        let mut var_adj: HashMap<Coord3D, HashSet<Coord3D>> = HashMap::new();
+        for eq in equations {
+            let cells: Vec<Coord3D> = eq.cells.iter().copied().collect();
+            for i in 0..cells.len() {
+                for j in (i + 1)..cells.len() {
+                    var_adj.entry(cells[i]).or_default().insert(cells[j]);
+                    var_adj.entry(cells[j]).or_default().insert(cells[i]);
+                }
+                var_adj.entry(cells[i]).or_default();
+            }
+        }
+
+        // Find connected components via BFS
+        let mut visited: HashSet<Coord3D> = HashSet::new();
+        let mut components: Vec<Vec<Coord3D>> = Vec::new();
+
+        for &var in var_adj.keys() {
+            if visited.contains(&var) {
+                continue;
+            }
+            let mut comp = Vec::new();
+            let mut queue = VecDeque::new();
+            queue.push_back(var);
+            visited.insert(var);
+
+            while let Some(curr) = queue.pop_front() {
+                comp.push(curr);
+                if let Some(neighbors) = var_adj.get(&curr) {
+                    for &n in neighbors {
+                        if !visited.contains(&n) {
+                            visited.insert(n);
+                            queue.push_back(n);
+                        }
+                    }
+                }
+            }
+            components.push(comp);
+        }
+
+        // Solve each component independently
+        for comp_vars in components {
+            let comp_var_set: HashSet<Coord3D> = comp_vars.iter().copied().collect();
+            let comp_eqs: Vec<Equation> = equations
+                .iter()
+                .filter(|eq| eq.cells.iter().any(|c| comp_var_set.contains(c)))
+                .cloned()
+                .collect();
+
+            let max_bt_vars = if is_master { 18 } else { 14 };
+
+            if comp_vars.len() <= max_bt_vars {
+                // Exact Backtracking Model Counter (Tank Solver)
+                let (c_safe, c_mines, probs) =
+                    Self::solve_component_backtracking(&comp_vars, &comp_eqs);
+
+                for c in c_safe {
+                    certain_safe.insert(c);
+                }
+                for c in c_mines {
+                    certain_mines.insert(c);
+                }
+                for (c, p) in probs {
+                    cell_probs.insert(c, p);
+                }
+            } else {
+                // Fast Integer Gaussian Elimination for larger components
+                let (c_safe, c_mines, probs) =
+                    Self::solve_component_gaussian(&comp_vars, &comp_eqs);
+
+                for c in c_safe {
+                    certain_safe.insert(c);
+                }
+                for c in c_mines {
+                    certain_mines.insert(c);
+                }
+                for (c, p) in probs {
+                    cell_probs.insert(c, p);
+                }
+            }
+        }
+
+        (certain_safe, certain_mines, cell_probs)
+    }
+
+    /// Exact binary backtracking on a single connected component with MRV variable ordering
+    fn solve_component_backtracking(
+        vars: &[Coord3D],
+        eqs: &[Equation],
+    ) -> (HashSet<Coord3D>, HashSet<Coord3D>, HashMap<Coord3D, f64>) {
+        let mut certain_safe = HashSet::new();
+        let mut certain_mines = HashSet::new();
+        let mut probs = HashMap::new();
+
+        let n = vars.len();
+        if n == 0 {
+            return (certain_safe, certain_mines, probs);
+        }
+
+        // Order variables by constraint frequency (Most Constrained Variable first)
+        let mut var_freq: HashMap<Coord3D, usize> = HashMap::new();
+        for eq in eqs {
+            for &c in &eq.cells {
+                *var_freq.entry(c).or_insert(0) += 1;
+            }
+        }
+        let mut ordered_vars = vars.to_vec();
+        ordered_vars.sort_by_key(|c| std::cmp::Reverse(var_freq.get(c).copied().unwrap_or(0)));
+
+        let var_indices: HashMap<Coord3D, usize> = ordered_vars
+            .iter()
+            .enumerate()
+            .map(|(i, &c)| (c, i))
+            .collect();
+
+        // Convert equations into fast index masks
+        struct FastEq {
+            indices: Vec<usize>,
+            mines: usize,
+        }
+        let fast_eqs: Vec<FastEq> = eqs
+            .iter()
+            .map(|eq| FastEq {
+                indices: eq.cells.iter().map(|c| var_indices[c]).collect(),
+                mines: eq.mines,
+            })
+            .collect();
+
+        let mut valid_assignment_count = 0u64;
+        let mut var_mine_counts = vec![0u64; n];
+        let mut current_assignment = vec![0u8; n];
+
+        fn backtrack(
+            idx: usize,
+            n: usize,
+            assignment: &mut Vec<u8>,
+            fast_eqs: &[FastEq],
+            valid_count: &mut u64,
+            mine_counts: &mut [u64],
+        ) {
+            if *valid_count >= 5000 {
+                return;
+            }
+
+            // Prune if any equation is violated
+            for eq in fast_eqs {
+                let mut assigned_mines = 0;
+                let mut unassigned_count = 0;
+
+                for &v_idx in &eq.indices {
+                    if v_idx < idx {
+                        if assignment[v_idx] == 1 {
+                            assigned_mines += 1;
+                        }
+                    } else {
+                        unassigned_count += 1;
+                    }
+                }
+
+                if assigned_mines > eq.mines || assigned_mines + unassigned_count < eq.mines {
+                    return;
+                }
+            }
+
+            if idx == n {
+                *valid_count += 1;
+                for i in 0..n {
+                    if assignment[i] == 1 {
+                        mine_counts[i] += 1;
+                    }
+                }
+                return;
+            }
+
+            // Try x_idx = 0 (Safe)
+            assignment[idx] = 0;
+            backtrack(idx + 1, n, assignment, fast_eqs, valid_count, mine_counts);
+
+            // Try x_idx = 1 (Mine)
+            assignment[idx] = 1;
+            backtrack(idx + 1, n, assignment, fast_eqs, valid_count, mine_counts);
+        }
+
+        backtrack(
+            0,
+            n,
+            &mut current_assignment,
+            &fast_eqs,
+            &mut valid_assignment_count,
+            &mut var_mine_counts,
+        );
+
+        if valid_assignment_count > 0 {
+            for (i, &coord) in ordered_vars.iter().enumerate() {
+                let count = var_mine_counts[i];
+                if count == 0 {
+                    certain_safe.insert(coord);
+                    probs.insert(coord, 0.0);
+                } else if count == valid_assignment_count {
+                    certain_mines.insert(coord);
+                    probs.insert(coord, 1.0);
+                } else {
+                    let p = (count as f64) / (valid_assignment_count as f64);
+                    probs.insert(coord, p.clamp(0.001, 0.999));
+                }
+            }
+        }
+
+        (certain_safe, certain_mines, probs)
+    }
+
+    /// Fast Integer Gaussian Elimination on a single component
+    fn solve_component_gaussian(
+        vars: &[Coord3D],
+        eqs: &[Equation],
+    ) -> (HashSet<Coord3D>, HashSet<Coord3D>, HashMap<Coord3D, f64>) {
+        let mut certain_safe = HashSet::new();
+        let mut certain_mines = HashSet::new();
+        let mut probs = HashMap::new();
+
+        let n_vars = vars.len();
+        let n_eqs = eqs.len();
+        if n_vars == 0 || n_eqs == 0 {
+            return (certain_safe, certain_mines, probs);
+        }
+
+        let var_indices: HashMap<Coord3D, usize> =
+            vars.iter().enumerate().map(|(i, &c)| (c, i)).collect();
+
+        let mut matrix: Vec<Vec<f64>> = vec![vec![0.0; n_vars + 1]; n_eqs];
+        for (i, eq) in eqs.iter().enumerate() {
+            for c in &eq.cells {
+                if let Some(&col) = var_indices.get(c) {
+                    matrix[i][col] = 1.0;
+                }
+            }
+            matrix[i][n_vars] = eq.mines as f64;
+        }
+
+        // RREF
+        let mut lead = 0;
+        for r in 0..n_eqs {
+            if lead >= n_vars {
+                break;
+            }
+            let mut i = r;
+            while matrix[i][lead].abs() < 1e-6 {
+                i += 1;
+                if i == n_eqs {
+                    i = r;
+                    lead += 1;
+                    if lead == n_vars {
+                        break;
+                    }
+                }
+            }
+            if lead == n_vars {
+                break;
+            }
+
+            matrix.swap(i, r);
+            let lv = matrix[r][lead];
+            for val in &mut matrix[r] {
+                *val /= lv;
+            }
+
+            let pivot_row = matrix[r].clone();
+            for (row_idx, row_data) in matrix.iter_mut().enumerate().take(n_eqs) {
+                if row_idx != r {
+                    let factor = row_data[lead];
+                    if factor.abs() > 1e-6 {
+                        for (col_idx, val) in row_data.iter_mut().enumerate().take(n_vars + 1) {
+                            *val -= factor * pivot_row[col_idx];
+                        }
+                    }
+                }
+            }
+            lead += 1;
+        }
+
+        // Bound analysis
+        for row in &matrix {
+            let mut pos_sum = 0.0;
+            let mut neg_sum = 0.0;
+            let mut non_zero_cols = Vec::new();
+
+            for (col, &coeff) in row.iter().enumerate().take(n_vars) {
+                if coeff.abs() > 1e-6 {
+                    non_zero_cols.push((col, coeff));
+                    if coeff > 0.0 {
+                        pos_sum += coeff;
+                    } else {
+                        neg_sum += coeff;
+                    }
+                }
+            }
+
+            if non_zero_cols.is_empty() {
+                continue;
+            }
+
+            let rhs = row[n_vars];
+            if (pos_sum - rhs).abs() < 1e-5 {
+                for &(col, coeff) in &non_zero_cols {
+                    let coord = vars[col];
+                    if coeff > 0.0 {
+                        certain_mines.insert(coord);
+                    } else {
+                        certain_safe.insert(coord);
+                    }
+                }
+            }
+            if (neg_sum - rhs).abs() < 1e-5 {
+                for &(col, coeff) in &non_zero_cols {
+                    let coord = vars[col];
+                    if coeff > 0.0 {
+                        certain_safe.insert(coord);
+                    } else {
+                        certain_mines.insert(coord);
+                    }
+                }
+            }
+        }
+
+        for (col, &coord) in vars.iter().enumerate() {
+            if certain_safe.contains(&coord) {
+                probs.insert(coord, 0.0);
+            } else if certain_mines.contains(&coord) {
+                probs.insert(coord, 1.0);
+            } else {
+                let mut est = 0.3;
+                for row in &matrix {
+                    if row[col].abs() > 1e-6 {
+                        let rhs = row[n_vars];
+                        if (0.0..=1.0).contains(&rhs) {
+                            est = rhs / row[col];
+                            break;
+                        }
+                    }
+                }
+                probs.insert(coord, est.clamp(0.01, 0.99));
+            }
+        }
+
+        (certain_safe, certain_mines, probs)
     }
 
     fn pick_best_safe_cell(
@@ -358,164 +876,6 @@ impl AiSolver {
 
         best_cell.map(AiAction::Reveal)
     }
-
-    /// Full Gaussian Elimination (RREF) with [0, 1] bounded variable analysis
-    fn solve_gaussian_rref(
-        equations: &[Equation],
-        _remaining_mines: usize,
-    ) -> (HashSet<Coord3D>, HashSet<Coord3D>, HashMap<Coord3D, f64>) {
-        let mut certain_safe = HashSet::new();
-        let mut certain_mines = HashSet::new();
-        let mut cell_probs: HashMap<Coord3D, f64> = HashMap::new();
-
-        if equations.is_empty() {
-            return (certain_safe, certain_mines, cell_probs);
-        }
-
-        // Collect distinct variables
-        let mut var_map: HashMap<Coord3D, usize> = HashMap::new();
-        let mut var_list: Vec<Coord3D> = Vec::new();
-
-        for eq in equations {
-            for &c in &eq.cells {
-                if let std::collections::hash_map::Entry::Vacant(e) = var_map.entry(c) {
-                    e.insert(var_list.len());
-                    var_list.push(c);
-                }
-            }
-        }
-
-        let n_vars = var_list.len();
-        let n_eqs = equations.len();
-
-        if n_vars == 0 {
-            return (certain_safe, certain_mines, cell_probs);
-        }
-
-        // Build augmented matrix: [M | rhs]
-        let mut matrix: Vec<Vec<f64>> = vec![vec![0.0; n_vars + 1]; n_eqs];
-        for (i, eq) in equations.iter().enumerate() {
-            for &c in &eq.cells {
-                let col = var_map[&c];
-                matrix[i][col] = 1.0;
-            }
-            matrix[i][n_vars] = eq.mines as f64;
-        }
-
-        // Forward elimination and back substitution to RREF
-        let mut lead = 0;
-        for r in 0..n_eqs {
-            if lead >= n_vars {
-                break;
-            }
-            let mut i = r;
-            while matrix[i][lead].abs() < 1e-6 {
-                i += 1;
-                if i == n_eqs {
-                    i = r;
-                    lead += 1;
-                    if lead == n_vars {
-                        break;
-                    }
-                }
-            }
-            if lead == n_vars {
-                break;
-            }
-
-            matrix.swap(i, r);
-            let lv = matrix[r][lead];
-            for val in &mut matrix[r] {
-                *val /= lv;
-            }
-
-            let pivot_row = matrix[r].clone();
-            for (row_idx, row_data) in matrix.iter_mut().enumerate().take(n_eqs) {
-                if row_idx != r {
-                    let factor = row_data[lead];
-                    if factor.abs() > 1e-6 {
-                        for (col_idx, val) in row_data.iter_mut().enumerate().take(n_vars + 1) {
-                            *val -= factor * pivot_row[col_idx];
-                        }
-                    }
-                }
-            }
-            lead += 1;
-        }
-
-        // Bound analysis for each row:
-        // Sum(c_j * x_j) = rhs, where x_j in [0, 1]
-        for row in &matrix {
-            let mut pos_sum = 0.0;
-            let mut neg_sum = 0.0;
-            let mut non_zero_cols: Vec<(usize, f64)> = Vec::new();
-
-            for (col, &coeff) in row.iter().enumerate().take(n_vars) {
-                if coeff.abs() > 1e-6 {
-                    non_zero_cols.push((col, coeff));
-                    if coeff > 0.0 {
-                        pos_sum += coeff;
-                    } else {
-                        neg_sum += coeff;
-                    }
-                }
-            }
-
-            if non_zero_cols.is_empty() {
-                continue;
-            }
-
-            let rhs = row[n_vars];
-
-            // If Max possible sum == rhs: all positive coeff variables must be 1, all negative must be 0
-            if (pos_sum - rhs).abs() < 1e-5 {
-                for &(col, coeff) in &non_zero_cols {
-                    let coord = var_list[col];
-                    if coeff > 0.0 {
-                        certain_mines.insert(coord);
-                    } else {
-                        certain_safe.insert(coord);
-                    }
-                }
-            }
-
-            // If Min possible sum == rhs: all positive coeff variables must be 0, all negative must be 1
-            if (neg_sum - rhs).abs() < 1e-5 {
-                for &(col, coeff) in &non_zero_cols {
-                    let coord = var_list[col];
-                    if coeff > 0.0 {
-                        certain_safe.insert(coord);
-                    } else {
-                        certain_mines.insert(coord);
-                    }
-                }
-            }
-        }
-
-        // Generate baseline probabilities for variables
-        for (col, &coord) in var_list.iter().enumerate() {
-            if certain_safe.contains(&coord) {
-                cell_probs.insert(coord, 0.0);
-            } else if certain_mines.contains(&coord) {
-                cell_probs.insert(coord, 1.0);
-            } else {
-                // Approximate from single coefficient rows
-                let mut est_p = 0.2;
-                for row in &matrix {
-                    if row[col].abs() > 1e-6 {
-                        let rhs = row[n_vars];
-                        if (0.0..=1.0).contains(&rhs) {
-                            est_p = rhs / row[col];
-                            break;
-                        }
-                    }
-                }
-                cell_probs.insert(coord, est_p.clamp(0.01, 0.99));
-            }
-        }
-
-        (certain_safe, certain_mines, cell_probs)
-    }
 }
 
 #[cfg(test)]
@@ -559,7 +919,7 @@ mod tests {
                 }
             }
 
-            if moves >= 30 {
+            if moves >= 50 {
                 break;
             }
         }

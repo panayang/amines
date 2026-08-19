@@ -216,8 +216,19 @@ impl Board {
         let mut safe_indices = HashSet::new();
         safe_indices.insert(safe_center.to_index(self.dims.width, self.dims.height));
 
-        for neighbor in self.dims.get_neighbors(safe_center) {
+        let hop1 = self.dims.get_neighbors(safe_center);
+        for neighbor in &hop1 {
             safe_indices.insert(neighbor.to_index(self.dims.width, self.dims.height));
+        }
+
+        // On larger boards (Medium / Expert), expand safe zone to 2-hop radius (~75 cells)
+        // so that the initial opening produces overlapping clues for logical deduction
+        if self.dims.total_cells() >= 500 {
+            for neighbor in hop1 {
+                for hop2 in self.dims.get_neighbors(neighbor) {
+                    safe_indices.insert(hop2.to_index(self.dims.width, self.dims.height));
+                }
+            }
         }
 
         let total = self.dims.total_cells();

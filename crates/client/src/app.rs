@@ -33,6 +33,7 @@ pub fn App() -> impl IntoView {
     });
 
     let on_open_stats = Callback::new(move |()| {
+        auth.refresh_stats();
         set_show_stats_first.set(true);
         set_auth_open.set(true);
     });
