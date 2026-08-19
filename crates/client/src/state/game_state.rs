@@ -303,6 +303,7 @@ impl GameState {
         }
 
         if board.toggle_flag(coord) {
+            self.set_sp_moves.update(|m| *m += 1);
             self.set_sp_board.set(board);
         }
     }

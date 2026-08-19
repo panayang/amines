@@ -130,3 +130,53 @@ fn test_cli_benchmark_command() {
     .stdout(predicate::str::contains("BENCHMARK REPORT"))
     .stdout(predicate::str::contains("win_rate_pct"));
 }
+
+#[test]
+fn test_cli_interactive_play_repl() {
+    let mut cmd = Command::cargo_bin("amine-cli").unwrap();
+    cmd.args(["play", "-d", "easy", "--seed", "42"])
+        .write_stdin("r 4 4 1\nh\nauto\nz 0\nrecords\nq\n")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "3D MÖBIUS MINESWEEPER // ENHANCED CONSOLE REPL ENGINE",
+        ))
+        .stdout(predicate::str::contains("Layer Z ="))
+        .stdout(predicate::str::contains("AI"))
+        .stdout(predicate::str::contains("PERSONAL BESTS"))
+        .stdout(predicate::str::contains("Goodbye"));
+}
+
+#[test]
+fn test_cli_interactive_pause_radar_and_solve() {
+    let mut cmd = Command::cargo_bin("amine-cli").unwrap();
+    cmd.args(["play", "-d", "easy", "--seed", "42"])
+        .write_stdin("r 4 4 1\nradar 0 0 0\np\np\nhistory\nsolve\nrecords\nq\n")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("TOPOLOGICAL RADAR INSPECTION"))
+        .stdout(predicate::str::contains("SIMULATION PAUSED"))
+        .stdout(predicate::str::contains("Game Resumed"))
+        .stdout(predicate::str::contains("MOVE HISTORY LOG"))
+        .stdout(
+            predicate::str::contains("AI Solver halted")
+                .or(predicate::str::contains("CONGRATULATIONS"))
+                .or(predicate::str::contains("BOOM")),
+        );
+}
+
+#[test]
+fn test_cli_custom_interactive_and_diff_command() {
+    // 1. Launch directly with custom flags: -w 14 -H 10 -z 2 -m 20
+    let mut cmd = Command::cargo_bin("amine-cli").unwrap();
+    cmd.args([
+        "play", "-w", "14", "-H", "10", "-z", "2", "-m", "20", "--seed", "42",
+    ])
+    .write_stdin("diff custom 8 8 2 10\nr 4 4 0\nq\n")
+    .assert()
+    .success()
+    .stdout(predicate::str::contains(
+        "Difficulty switched to Custom (8x8x2, 10 mines)",
+    ))
+    .stdout(predicate::str::contains("Layer Z = 0 / 1"));
+}

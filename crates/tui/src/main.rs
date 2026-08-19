@@ -945,6 +945,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             BotTier::Master,
                                             app.board_config.mines,
                                         ) {
+                                            app.moves_count += 1;
                                             match act {
                                                 AiAction::Reveal(c) => {
                                                     app.board.reveal(c, None, None);
@@ -967,6 +968,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                         c.x, c.y, c.z
                                                     );
                                                 }
+                                            }
+                                            if app.board.status == GameStatus::Won {
+                                                app.pb_records.update_if_best(
+                                                    app.board_config.difficulty,
+                                                    app.elapsed_secs,
+                                                    app.moves_count,
+                                                );
+                                                app.show_pb_modal = true;
                                             }
                                         }
                                     }

@@ -1298,6 +1298,7 @@ impl DesktopApp {
         if let Some(act) =
             AiSolver::decide_action(self.board.dims, &snapshots, tier, self.board_config.mines)
         {
+            self.moves_count += 1;
             match act {
                 AiAction::Reveal(c) => {
                     self.last_hint = Some(if is_zh {
@@ -1338,6 +1339,14 @@ impl DesktopApp {
             }
             if self.board.status == GameStatus::Won {
                 self.face_state = FaceState::Won;
+                if !self.sp_victory_modal {
+                    self.is_new_pb_achieved = self.pb_records.update_if_best(
+                        self.board_config.difficulty,
+                        self.elapsed_secs,
+                        self.moves_count,
+                    );
+                    self.sp_victory_modal = true;
+                }
             }
         } else {
             self.last_hint = Some(
