@@ -1,0 +1,6 @@
+round,model,difficulty,dimensions,total_mines,total_non_mines,status,moves,revealed_cells,revealed_pct,correct_flags,false_flags,total_flags,flag_precision_pct,flag_recall_pct,duration_secs,end_reason
+1,gemma4:cloud,easy,9x9x3,25,218,LOST,30,116,53.21,2,1,3,66.67,8.00,124.82,"Hit mine @ (7,7,2)"
+2,gemma4:cloud,easy,9x9x3,25,218,LOST,4,152,69.72,0,0,0,100.00,0.00,13.51,"Hit mine @ (8,0,1)"
+3,gemma4:cloud,easy,9x9x3,25,218,LOST,16,137,62.84,3,5,8,37.50,12.00,59.21,"Hit mine @ (3,8,1)"
+4,gemma4:cloud,easy,9x9x3,25,218,LOST,6,161,73.85,0,0,0,100.00,0.00,18.88,"Hit mine @ (7,0,0)"
+5,gemma4:cloud,easy,9x9x3,25,218,LOST,11,142,65.14,0,3,3,0.00,0.00,33.10,"Hit mine @ (6,8,2)"
