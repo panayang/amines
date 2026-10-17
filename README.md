@@ -8,7 +8,7 @@ An implementation of Minesweeper set in a 3D non-Euclidean Möbius strip manifol
 
 ---
 
-## 🌌 Mathematical Topology
+## Mathematical Topology
 
 Traditional Minesweeper operates on a flat 2D Euclidean grid with 8 adjacent neighbors. **3D Möbius Minesweeper** extends the grid across $W \times H \times D$ coordinates with **26-neighbor 3D Moore connectivity**:
 
@@ -25,7 +25,7 @@ Traditional Minesweeper operates on a flat 2D Euclidean grid with 8 adjacent nei
 
 ---
 
-## 📦 Workspace Architecture
+## Workspace Architecture
 
 The project is structured as a cargo workspace with 6 specialized crates:
 
@@ -56,7 +56,7 @@ The project is structured as a cargo workspace with 6 specialized crates:
 
 ---
 
-## 🎮 Preset Difficulties
+## Preset Difficulties
 
 | Difficulty | Dimensions ($W \times H \times D$) | Total Cells | Mines | Mine Density |
 | :--- | :--- | :--- | :--- | :--- |
@@ -67,7 +67,7 @@ The project is structured as a cargo workspace with 6 specialized crates:
 
 ---
 
-## 🚀 Quick Start
+## Quick Start
 
 ### Prerequisites
 - [Rust](https://www.rust-lang.org/) (version 1.80+ or latest stable)
