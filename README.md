@@ -115,7 +115,7 @@ cargo run --bin amine-cli -- benchmark -D easy --tier master -n 50
 
 ---
 
-## 🧪 Testing & Verification
+## Testing & Verification
 
 Run the full workspace automated test suite:
 ```bash
@@ -129,7 +129,7 @@ cargo clippy --workspace --all-targets
 
 ---
 
-## ⌨️ TUI Keybindings Reference
+## TUI Keybindings Reference
 
 - **`[WASD]` / `[Arrow Keys]`**: Move cursor across current 2D layer.
 - **`[PgUp]` / `[PgDn]`** or **`[` / `]`**: Ascend / descend 3D depth layers ($Z$).
